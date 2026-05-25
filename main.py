@@ -1,0 +1,436 @@
+# =========================================================
+# IMPORTS
+# =========================================================
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+import pandas as pd
+import numpy as np
+import joblib
+import os
+
+from typing import List
+
+# =========================================================
+# IMPORT FEATURE ENGINE
+# =========================================================
+from feature_engine import compute_features
+
+# =========================================================
+# BASE DIRECTORY
+# =========================================================
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+# =========================================================
+# LOAD MODEL
+# =========================================================
+model = joblib.load(
+    os.path.join(
+        BASE_DIR,
+        "creditsentinel_model_v1.pkl"
+    )
+)
+
+print("✅ Real model loaded")
+print(type(model))
+
+# =========================================================
+# FASTAPI APP
+# =========================================================
+app = FastAPI(
+    title="Loan Risk Scoring API",
+    description="API for predicting loan application risk tiers",
+    version="1.0"
+)
+
+# =========================================================
+# ENABLE CORS
+# =========================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================================================
+# REQUEST MODELS
+# =========================================================
+class ScoreRequest(BaseModel):
+
+    application_id: str
+
+
+class BatchScoreRequest(BaseModel):
+
+    application_ids: List[str]
+
+# =========================================================
+# HEALTH ENDPOINT
+# =========================================================
+@app.get("/health")
+def health():
+
+    return {
+        "status": "ok",
+        "model_loaded": True,
+        "features": 43
+    }
+
+# =========================================================
+# SCORE ENDPOINT
+# =========================================================
+@app.post("/api/score")
+def score_application(req: ScoreRequest):
+
+    try:
+
+        # =================================================
+        # STEP 1: FETCH FEATURES
+        # =================================================
+        features_dict = compute_features(
+            req.application_id
+        )
+
+        # =================================================
+        # STEP 2: MODEL FEATURES
+        # =================================================
+        if hasattr(model, "feature_names_in_"):
+
+            model_features = list(
+                model.feature_names_in_
+            )
+
+        elif hasattr(model, "feature_name_"):
+
+            model_features = list(
+                model.feature_name_
+            )
+
+        else:
+
+            return {
+                "application_id": req.application_id,
+                "model_loaded": False,
+                "error": "Model feature names not found"
+            }
+
+        # =================================================
+        # STEP 3: FILTER FEATURES
+        # =================================================
+        features_filtered = {}
+
+        for feature in model_features:
+
+            if feature in features_dict:
+
+                features_filtered[feature] = (
+                    features_dict[feature]
+                )
+
+            else:
+
+                features_filtered[feature] = 0
+
+        # =================================================
+        # STEP 4: DATAFRAME
+        # =================================================
+        features_df = pd.DataFrame(
+            [features_filtered]
+        )
+
+        features_df = features_df[
+            model_features
+        ]
+
+        features_df = features_df.fillna(0)
+
+        # =================================================
+        # STEP 5: CONVERT NUMERIC
+        # =================================================
+        for col in features_df.columns:
+
+            try:
+
+                features_df[col] = pd.to_numeric(
+                    features_df[col]
+                )
+
+            except:
+
+                pass
+
+        # =================================================
+        # STEP 6: PREDICT
+        # =================================================
+        prediction = model.predict_proba(
+            features_df
+        )
+
+        risk_score = prediction[:, 1][0]
+
+        risk_score = round(
+            float(risk_score),
+            4
+        )
+
+        # =================================================
+        # STEP 7: RISK TIER
+        # =================================================
+        if risk_score < 0.4:
+
+            tier = "Low"
+
+        elif risk_score < 0.65:
+
+            tier = "Medium"
+
+        else:
+
+            tier = "High"
+
+        # =================================================
+        # RESPONSE
+        # =================================================
+        return {
+
+            "application_id":
+            req.application_id,
+
+            "model_loaded":
+            True,
+
+            "risk_score":
+            risk_score,
+
+            "risk_tier":
+            tier,
+
+            "features_used":
+            len(features_df.columns)
+        }
+
+    except Exception as e:
+
+        return {
+
+            "application_id":
+            req.application_id,
+
+            "model_loaded":
+            False,
+
+            "error":
+            str(e)
+        }
+
+# =========================================================
+# SCORE BATCH
+# =========================================================
+@app.post("/api/score-batch")
+def score_batch(req: BatchScoreRequest):
+
+    results = []
+
+    for app_id in req.application_ids:
+
+        try:
+
+            features_dict = compute_features(
+                app_id
+            )
+
+            if hasattr(model, 'feature_names_in_'):
+
+                model_features = list(
+                    model.feature_names_in_
+                )
+
+            else:
+
+                model_features = list(
+                    model.feature_name_
+                )
+
+            features_filtered = {
+                name: features_dict.get(name, 0)
+                for name in model_features
+            }
+
+            features_df = pd.DataFrame(
+                [features_filtered]
+            )
+
+            features_df = features_df[
+                model_features
+            ]
+
+            features_df = features_df.fillna(0)
+
+            # =============================================
+            # SAFE NUMERIC CONVERSION
+            # =============================================
+            for col in features_df.columns:
+
+                try:
+
+                    features_df[col] = pd.to_numeric(
+                        features_df[col]
+                    )
+
+                except:
+
+                    pass
+
+            risk_score = model.predict_proba(
+                features_df
+            )[:,1][0]
+
+            risk_score = round(
+                float(risk_score),
+                4
+            )
+
+            if risk_score < 0.3:
+
+                tier = "Low"
+
+            elif risk_score < 0.6:
+
+                tier = "Medium"
+
+            else:
+
+                tier = "High"
+
+            results.append({
+
+                "application_id":
+                app_id,
+
+                "model_loaded":
+                True,
+
+                "risk_score":
+                risk_score,
+
+                "risk_tier":
+                tier,
+
+                "features_used":
+                len(features_filtered)
+            })
+
+        except Exception as e:
+
+            results.append({
+
+                "application_id":
+                app_id,
+
+                "model_loaded":
+                False,
+
+                "error":
+                str(e)
+            })
+
+    return {
+
+        "total_applications":
+        len(req.application_ids),
+
+        "results":
+        results
+    }
+
+# =========================================================
+# APPLICATIONS ENDPOINT
+# =========================================================
+@app.get("/api/applications")
+def get_applications():
+
+    return {
+
+        "total": 5,
+
+        "applications": [
+
+            {
+                "application_id": "APP-000001",
+                "applicant_name": "Rahul Yadav"
+            },
+
+            {
+                "application_id": "APP-000002",
+                "applicant_name": "Priya Sharma"
+            },
+
+            {
+                "application_id": "APP-000003",
+                "applicant_name": "Amit Kumar"
+            },
+
+            {
+                "application_id": "APP-000004",
+                "applicant_name": "Sneha Reddy"
+            },
+
+            {
+                "application_id": "APP-000005",
+                "applicant_name": "Vikram Singh"
+            }
+        ]
+    }
+
+# =========================================================
+# APPLICATION DETAIL
+# =========================================================
+@app.get("/api/applications/{application_id}")
+def get_application_detail(
+    application_id: str
+):
+
+    red_flags = []
+
+    if application_id == "APP-000004":
+
+        red_flags = [
+            "High FOIR",
+            "Low Income",
+            "Large Loan Amount"
+        ]
+
+    return {
+
+        "application_id": application_id,
+        "applicant_name": "Rahul Yadav",
+        "monthly_income": 55107,
+        "requested_loan_amount": 390000,
+        "foir": 26.48,
+        "cibil_score": 706,
+        "employment_type": "Self-Employed",
+        "employment_years": 1.0,
+        "risk_score": 39.2,
+        "risk_tier": "Low",
+        "red_flags": red_flags,
+        "memo_available": False
+    }
+
+# =========================================================
+# PORTFOLIO SUMMARY
+# =========================================================
+@app.get("/api/portfolio/summary")
+def portfolio_summary():
+
+    return {
+
+        "total_applications": 15000,
+        "approved": 8200,
+        "rejected": 4100,
+        "pending": 2700
+    }
