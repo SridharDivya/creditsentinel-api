@@ -1,15 +1,44 @@
+!pip install -q fastapi uvicorn pyngrok nest_asyncio python-multipart pandas numpy scikit-learn xgboost joblib
+!pip install -q pyngrok
+# LOAD TRAINED MODEL
+from config import Config
+model = joblib.load(Config.MODEL_PATH)
+
+print("✅ Real model loaded")
+print(type(model))
+features_dict = compute_features(
+    "APP-000001"
+)
+
+print(type(features_dict))
+print(len(features_dict))
+print(features_dict)
+# =========================================================
+# CreditSentinel ML API - FINAL FIXED VERSION
+# DIFFERENT RISK SCORES FOR DIFFERENT APPLICATIONS
+# Google Colab Compatible
+# =========================================================
+
+# =========================================================
+# INSTALL REQUIRED PACKAGES
+# =========================================================
+!pip install -q fastapi uvicorn pyngrok nest_asyncio python-multipart pandas numpy scikit-learn xgboost joblib
+
 # =========================================================
 # IMPORTS
 # =========================================================
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
+import nest_asyncio
+import uvicorn
+import threading
+import datetime
 import pandas as pd
 import numpy as np
 import joblib
-import os
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from pyngrok import ngrok
 from typing import List
 
 # =========================================================
@@ -18,25 +47,18 @@ from typing import List
 from feature_engine import compute_features
 
 # =========================================================
-# BASE DIRECTORY
+# FIX COLAB EVENT LOOP ISSUE
 # =========================================================
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
+nest_asyncio.apply()
 
 # =========================================================
 # LOAD MODEL
 # =========================================================
-model = joblib.load(
-    os.path.join(
-        BASE_DIR,
-        "creditsentinel_model_v1.pkl"
-    )
-)
+from config import Config
+model = joblib.load(Config.MODEL_PATH)
 
 print("✅ Real model loaded")
 print(type(model))
-
 # =========================================================
 # FASTAPI APP
 # =========================================================
@@ -354,6 +376,9 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 # APPLICATION LIST ENDPOINT
 # =========================================================
+# =========================================================
+# APPLICATION LIST ENDPOINT
+# =========================================================
 @app.get("/api/applications")
 def get_applications():
 
@@ -362,10 +387,15 @@ def get_applications():
         {
             "application_id": "APP-000001",
             "applicant_name": "Rahul Yadav",
+
+            "monthly_income": 55107,
+            "foir": 26.48,
+            "cibil_score": 706,
+            "requested_loan_amount": 390000,
+
             "risk_score": 0.2145,
             "risk_tier": "low",
-            "credit_score": 706,
-            "loan_amount": 390000,
+
             "application_status": "approved",
             "date_applied": "2026-05-20"
         },
@@ -373,10 +403,15 @@ def get_applications():
         {
             "application_id": "APP-000002",
             "applicant_name": "Priya Sharma",
+
+            "monthly_income": 43911,
+            "foir": 35.61,
+            "cibil_score": 682,
+            "requested_loan_amount": 150000,
+
             "risk_score": 0.5812,
             "risk_tier": "medium",
-            "credit_score": 682,
-            "loan_amount": 150000,
+
             "application_status": "pending",
             "date_applied": "2026-05-18"
         },
@@ -384,10 +419,15 @@ def get_applications():
         {
             "application_id": "APP-000003",
             "applicant_name": "Amit Kumar",
+
+            "monthly_income": 77300,
+            "foir": 35.63,
+            "cibil_score": 721,
+            "requested_loan_amount": 170000,
+
             "risk_score": 0.3411,
             "risk_tier": "low",
-            "credit_score": 721,
-            "loan_amount": 170000,
+
             "application_status": "approved",
             "date_applied": "2026-05-15"
         },
@@ -395,10 +435,15 @@ def get_applications():
         {
             "application_id": "APP-000004",
             "applicant_name": "Sneha Reddy",
+
+            "monthly_income": 32000,
+            "foir": 68.20,
+            "cibil_score": 590,
+            "requested_loan_amount": 500000,
+
             "risk_score": 0.8123,
             "risk_tier": "high",
-            "credit_score": 590,
-            "loan_amount": 500000,
+
             "application_status": "rejected",
             "date_applied": "2026-05-12"
         },
@@ -406,10 +451,15 @@ def get_applications():
         {
             "application_id": "APP-000005",
             "applicant_name": "Vikram Singh",
+
+            "monthly_income": 95000,
+            "foir": 42.10,
+            "cibil_score": 745,
+            "requested_loan_amount": 800000,
+
             "risk_score": 0.6534,
             "risk_tier": "high",
-            "credit_score": 745,
-            "loan_amount": 800000,
+
             "application_status": "pending",
             "date_applied": "2026-05-10"
         }
@@ -425,6 +475,9 @@ def get_applications():
 # =========================================================
 # SINGLE APPLICATION DETAIL ENDPOINT
 # =========================================================
+# =========================================================
+# SINGLE APPLICATION DETAIL ENDPOINT
+# =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
 
@@ -433,10 +486,15 @@ def get_application_detail(application_id: str):
         "APP-000001": {
             "application_id": "APP-000001",
             "applicant_name": "Rahul Yadav",
+
+            "monthly_income": 55107,
+            "foir": 26.48,
+            "cibil_score": 706,
+            "requested_loan_amount": 390000,
+
             "risk_score": 0.2145,
             "risk_tier": "low",
-            "credit_score": 706,
-            "loan_amount": 390000,
+
             "application_status": "approved",
             "date_applied": "2026-05-20"
         },
@@ -444,10 +502,15 @@ def get_application_detail(application_id: str):
         "APP-000002": {
             "application_id": "APP-000002",
             "applicant_name": "Priya Sharma",
+
+            "monthly_income": 43911,
+            "foir": 35.61,
+            "cibil_score": 682,
+            "requested_loan_amount": 150000,
+
             "risk_score": 0.5812,
             "risk_tier": "medium",
-            "credit_score": 682,
-            "loan_amount": 150000,
+
             "application_status": "pending",
             "date_applied": "2026-05-18"
         },
@@ -455,10 +518,15 @@ def get_application_detail(application_id: str):
         "APP-000003": {
             "application_id": "APP-000003",
             "applicant_name": "Amit Kumar",
+
+            "monthly_income": 77300,
+            "foir": 35.63,
+            "cibil_score": 721,
+            "requested_loan_amount": 170000,
+
             "risk_score": 0.3411,
             "risk_tier": "low",
-            "credit_score": 721,
-            "loan_amount": 170000,
+
             "application_status": "approved",
             "date_applied": "2026-05-15"
         },
@@ -466,10 +534,15 @@ def get_application_detail(application_id: str):
         "APP-000004": {
             "application_id": "APP-000004",
             "applicant_name": "Sneha Reddy",
+
+            "monthly_income": 32000,
+            "foir": 68.20,
+            "cibil_score": 590,
+            "requested_loan_amount": 500000,
+
             "risk_score": 0.8123,
             "risk_tier": "high",
-            "credit_score": 590,
-            "loan_amount": 500000,
+
             "application_status": "rejected",
             "date_applied": "2026-05-12"
         },
@@ -477,18 +550,23 @@ def get_application_detail(application_id: str):
         "APP-000005": {
             "application_id": "APP-000005",
             "applicant_name": "Vikram Singh",
+
+            "monthly_income": 95000,
+            "foir": 42.10,
+            "cibil_score": 745,
+            "requested_loan_amount": 800000,
+
             "risk_score": 0.6534,
             "risk_tier": "high",
-            "credit_score": 745,
-            "loan_amount": 800000,
+
             "application_status": "pending",
             "date_applied": "2026-05-10"
         }
     }
 
-    # ==========================================
-    # RETURN MATCHING APPLICATION
-    # ==========================================
+    # =====================================================
+    # RETURN CORRECT APPLICATION
+    # =====================================================
     if application_id in applications:
 
         return applications[application_id]
