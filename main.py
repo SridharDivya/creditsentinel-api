@@ -468,137 +468,76 @@ def score_batch(req: BatchScoreRequest):
 # APPLICATIONS ENDPOINT
 # =========================================================
 # =========================================================
+# =====================================================
 # APPLICATION LIST ENDPOINT
-# =========================================================
+# =====================================================
+
 @app.get("/api/applications")
 def get_applications():
 
-    applications = []
+    try:
 
-    for _, row in applications_df.iterrows():
+        applications = []
 
-        application_id = str(
-            row.get("application_id", "")
-        )
+        for _, row in applications_df.iterrows():
 
-        applicant_name = str(
-            row.get("applicant_name", "")
-        )
+            application = {
 
-        monthly_income = float(
-            row.get("monthly_income", 0)
-        )
+                "application_id":
+                str(row.get("application_id", "")),
 
-        loan_amount = float(
-            row.get(
-                "requested_loan_amount",
-                0
-            )
-        )
+                "applicant_name":
+                str(row.get("applicant_name", "")),
 
-        monthly_emi = float(
-            row.get(
-                "existing_monthly_emi",
-                0
-            )
-        )
+                "monthly_income":
+                float(row.get("monthly_income", 0)),
 
-        # =========================================
-        # FOIR CALCULATION
-        # =========================================
-        if monthly_income > 0:
-
-            foir = round(
-                (
-                    monthly_emi
-                    / monthly_income
-                ) * 100,
-                2
-            )
-
-        else:
-
-            foir = 0
-
-        # =========================================
-        # GET LIVE RISK SCORE
-        # =========================================
-        score_result = score_application(
-            ScoreRequest(
-                application_id=application_id
-            )
-        )
-
-        risk_score = score_result.get(
-            "risk_score",
-            0
-        )
-
-        risk_tier = score_result.get(
-            "risk_tier",
-            "Low"
-        )
-
-        # =========================================
-        # FINAL APPLICATION RECORD
-        # =========================================
-        applications.append({
-
-            "application_id":
-            application_id,
-
-            "applicant_name":
-            applicant_name,
-
-            # IMPORTANT FIXES
-            "monthly_income":
-            monthly_income,
-
-            "loan_amount":
-            loan_amount,
-
-            "foir":
-            foir,
-
-            "risk_score":
-            risk_score,
-
-            "risk_tier":
-            risk_tier,
-
-            "credit_score":
-            int(
-                row.get(
-                    "cibil_score",
+                "loan_amount":
+                float(row.get(
+                    "requested_loan_amount",
                     0
-                )
-            ),
+                )),
 
-            "application_status":
-            str(
-                row.get(
+                "foir":
+                float(row.get("foir", 0)),
+
+                "credit_score":
+                int(row.get("cibil_score", 0)),
+
+                "risk_score":
+                float(row.get("risk_score", 0)),
+
+                "risk_tier":
+                str(row.get("risk_tier", "Low")),
+
+                "application_status":
+                str(row.get(
                     "application_status",
                     "Pending"
-                )
-            ),
+                )),
 
-            "date_applied":
-            str(
-                row.get(
-                    "date_applied",
-                    ""
-                )
-            )
-        })
+                "date_applied":
+                str(row.get("date_applied", ""))
+            }
 
-    return {
+            applications.append(application)
 
-        "total":
-        len(applications),
+        return {
 
-        "applications":
-        applications
-    }
+            "total":
+            len(applications),
+
+            "applications":
+            applications
+        }
+
+    except Exception as e:
+
+        return {
+
+            "error":
+            str(e)
+        }
 
 # =========================================================
 # APPLICATION ID
