@@ -4,8 +4,16 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=10000
+    
     )
+import os
 
+class Config:
+
+    MODEL_PATH = os.getenv(
+        "MODEL_PATH",
+        "creditsentinel_model_v1.pkl"
+    )
 # LOAD TRAINED MODEL
 from config import Config
 model = joblib.load(Config.MODEL_PATH)
