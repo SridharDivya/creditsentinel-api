@@ -42,21 +42,7 @@ print("✅ Real model loaded")
 print(type(model))
 =========================================================
 # LOAD APPLICATION DATA
-# =========================================================
-
-applications_df = pd.read_csv(
-    "loan_applications.csv"
-)
-
-print("✅ Applications CSV Loaded")
-print("Total Records:", len(applications_df))
-
-# OPTIONAL: CLEAN COLUMN NAMES
-applications_df.columns = [
-    col.strip() for col in applications_df.columns
-]
-
-print(applications_df.columns)
+# 
 # =========================================================
 # LOAD CSV FILES
 # =========================================================
@@ -486,75 +472,57 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 # =====================================================
 # APPLICATION LIST ENDPOINT
-# =====================================================
 
 @app.get("/api/applications")
 def get_applications():
 
-    try:
+    applications = []
 
-        applications = []
+    for _, row in applications_df.iterrows():
 
-        for _, row in applications_df.iterrows():
+        application = {
 
-            application = {
+            "application_id":
+            str(row.get("application_id", "")),
 
-                "application_id":
-                str(row.get("application_id", "")),
+            "applicant_name":
+            str(row.get("applicant_name", "")),
 
-                "applicant_name":
-                str(row.get("applicant_name", "")),
+            "monthly_income":
+            float(row.get("monthly_income", 0)),
 
-                "monthly_income":
-                float(row.get("monthly_income", 0)),
+            "loan_amount":
+            float(row.get("loan_amount", 0)),
 
-                "loan_amount":
-                float(row.get(
-                    "requested_loan_amount",
-                    0
-                )),
+            "foir":
+            float(row.get("foir", 0)),
 
-                "foir":
-                float(row.get("foir", 0)),
+            "risk_score":
+            float(row.get("risk_score", 0)),
 
-                "credit_score":
-                int(row.get("cibil_score", 0)),
+            "risk_tier":
+            str(row.get("risk_tier", "Low")),
 
-                "risk_score":
-                float(row.get("risk_score", 0)),
+            "credit_score":
+            int(row.get("cibil_score", 0)),
 
-                "risk_tier":
-                str(row.get("risk_tier", "Low")),
+            "application_status":
+            str(row.get("application_status", "Pending")),
 
-                "application_status":
-                str(row.get(
-                    "application_status",
-                    "Pending"
-                )),
-
-                "date_applied":
-                str(row.get("date_applied", ""))
-            }
-
-            applications.append(application)
-
-        return {
-
-            "total":
-            len(applications),
-
-            "applications":
-            applications
+            "date_applied":
+            str(row.get("date_applied", ""))
         }
 
-    except Exception as e:
+        applications.append(application)
 
-        return {
+    return {
 
-            "error":
-            str(e)
-        }
+        "total":
+        len(applications),
 
+        "applications":
+        applications
+    }
 # =========================================================
 # APPLICATION ID
 # =========================================================
