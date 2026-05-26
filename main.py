@@ -382,6 +382,9 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 # APPLICATION LIST ENDPOINT
 # =========================================================
+# =========================================================
+# APPLICATION LIST ENDPOINT
+# =========================================================
 @app.get("/api/applications")
 def get_applications():
 
@@ -389,55 +392,119 @@ def get_applications():
 
     for _, row in applications_df.iterrows():
 
-        application = {
+        application_id = str(
+            row.get("application_id", "")
+        )
 
-            # =========================================
-            # REQUIRED FRONTEND FIELDS
-            # =========================================
+        applicant_name = str(
+            row.get("applicant_name", "")
+        )
+
+        monthly_income = float(
+            row.get("monthly_income", 0)
+        )
+
+        loan_amount = float(
+            row.get(
+                "requested_loan_amount",
+                0
+            )
+        )
+
+        existing_monthly_emi = float(
+            row.get(
+                "existing_monthly_emi",
+                0
+            )
+        )
+
+        # =========================================
+        # CALCULATE FOIR
+        # =========================================
+        if monthly_income > 0:
+
+            foir = round(
+                (
+                    existing_monthly_emi
+                    / monthly_income
+                ) * 100,
+                2
+            )
+
+        else:
+
+            foir = 0
+
+        # =========================================
+        # GET LIVE RISK SCORE
+        # =========================================
+        score_result = score_application(
+            ScoreRequest(
+                application_id=application_id
+            )
+        )
+
+        risk_score = score_result.get(
+            "risk_score",
+            0
+        )
+
+        risk_tier = score_result.get(
+            "risk_tier",
+            "Low"
+        )
+
+        # =========================================
+        # FINAL RESPONSE RECORD
+        # =========================================
+        applications.append({
 
             "application_id":
-            str(row.get("application_id", "")),
+            application_id,
 
             "applicant_name":
-            str(row.get("applicant_name", "")),
+            applicant_name,
 
             # IMPORTANT FIXES
             "monthly_income":
-            float(row.get("monthly_income", 0)),
-
-            "requested_loan_amount":
-            float(row.get(
-                "requested_loan_amount",
-                0
-            )),
+            monthly_income,
 
             "foir":
-            float(row.get("foir", 0)),
+            foir,
 
-            # =========================================
-            # OTHER FIELDS
-            # =========================================
-
-            "cibil_score":
-            int(row.get("cibil_score", 0)),
+            "loan_amount":
+            loan_amount,
 
             "risk_score":
-            float(row.get("risk_score", 0)),
+            risk_score,
 
             "risk_tier":
-            str(row.get("risk_tier", "low")),
+            risk_tier,
+
+            "credit_score":
+            int(
+                row.get(
+                    "cibil_score",
+                    0
+                )
+            ),
 
             "application_status":
-            str(row.get(
-                "application_status",
-                "pending"
-            )),
+            str(
+                row.get(
+                    "application_status",
+                    "Pending"
+                )
+            ),
 
             "date_applied":
-            str(row.get("date_applied", ""))
-        }
-
-        applications.append(application)
+            str(
+                row.get(
+                    "date_applied",
+                    ""
+                )
+            )
+        })
 
     return {
 
