@@ -127,12 +127,6 @@ os.path.join(
 )
 
 )
-applications_df = pd.read_csv(
-    os.path.join(
-        BASE_DIR,
-        "loan_applications.csv"
-    )
-)
 
 print("✅ CSV files loaded")
 
