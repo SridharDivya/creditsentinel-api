@@ -1,4 +1,10 @@
-!pip install -q fastapi uvicorn pyngrok nest_asyncio python-multipart pandas numpy scikit-learn xgboost joblib
+if __name__ == "__main__":
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=10000
+    )
 !pip install -q pyngrok
 # LOAD TRAINED MODEL
 from config import Config
@@ -20,26 +26,7 @@ print(features_dict)
 # =========================================================
 
 # =========================================================
-# INSTALL REQUIRED PACKAGES
-# =========================================================
-!pip install -q fastapi uvicorn pyngrok nest_asyncio python-multipart pandas numpy scikit-learn xgboost joblib
 
-# =========================================================
-# IMPORTS
-# =========================================================
-import nest_asyncio
-import uvicorn
-import threading
-import datetime
-import pandas as pd
-import numpy as np
-import joblib
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from pyngrok import ngrok
-from typing import List
 
 # =========================================================
 # IMPORT FEATURE ENGINE
