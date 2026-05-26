@@ -7,3 +7,4 @@ lightgbm
 joblib
 python-multipart
 pydantic
+python-dotenv
