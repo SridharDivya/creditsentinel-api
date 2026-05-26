@@ -527,57 +527,132 @@ def get_applications():
 def get_application_detail(application_id: str):
 
     matched = applications_df[
+
         applications_df["application_id"]
+
         == application_id
     ]
 
     if len(matched) == 0:
 
         return {
-            "error": "Application not found"
+            "error":
+            "Application not found"
         }
 
     row = matched.iloc[0]
 
+    # =========================================
+    # GET MONTHLY INCOME
+    # =========================================
+    monthly_income = float(
+        row.get("monthly_income", 0)
+    )
+
+    # =========================================
+    # GET MONTHLY EMI
+    # =========================================
+    monthly_emi = float(
+        row.get(
+            "existing_monthly_emi",
+            0
+        )
+    )
+
+    # =========================================
+    # CALCULATE FOIR
+    # =========================================
+    if monthly_income > 0:
+
+        foir = round(
+            (
+                monthly_emi
+                / monthly_income
+            ) * 100,
+            2
+        )
+
+    else:
+
+        foir = 0
+
+    # =========================================
+    # GET LIVE SCORE
+    # =========================================
+    score_result = score_application(
+        ScoreRequest(
+            application_id=application_id
+        )
+    )
+
     return {
 
         "application_id":
-        str(row.get("application_id", "")),
+        str(
+            row.get(
+                "application_id",
+                ""
+            )
+        ),
 
         "applicant_name":
-        str(row.get("applicant_name", "")),
+        str(
+            row.get(
+                "applicant_name",
+                ""
+            )
+        ),
 
         # IMPORTANT FIXES
         "monthly_income":
-        float(row.get("monthly_income", 0)),
+        monthly_income,
 
-        "requested_loan_amount":
-        float(row.get(
-            "requested_loan_amount",
-            0
-        )),
+        "loan_amount":
+        float(
+            row.get(
+                "requested_loan_amount",
+                0
+            )
+        ),
 
         "foir":
-        float(row.get("foir", 0)),
-
-        # OTHER FIELDS
-        "cibil_score":
-        int(row.get("cibil_score", 0)),
+        foir,
 
         "risk_score":
-        float(row.get("risk_score", 0)),
+        score_result.get(
+            "risk_score",
+            0
+        ),
 
         "risk_tier":
-        str(row.get("risk_tier", "low")),
+        score_result.get(
+            "risk_tier",
+            "Low"
+        ),
+
+        "credit_score":
+        int(
+            row.get(
+                "cibil_score",
+                0
+            )
+        ),
 
         "application_status":
-        str(row.get(
-            "application_status",
-            "pending"
-        )),
+        str(
+            row.get(
+                "application_status",
+                "Pending"
+            )
+        ),
 
         "date_applied":
-        str(row.get("date_applied", ""))
+        str(
+            row.get(
+                "date_applied",
+                ""
+            )
+        )
     }
 # =========================================================
 # PORTFOLIO SUMMARY
