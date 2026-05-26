@@ -40,7 +40,23 @@ model = joblib.load(
 
 print("✅ Real model loaded")
 print(type(model))
+=========================================================
+# LOAD APPLICATION DATA
+# =========================================================
 
+applications_df = pd.read_csv(
+    "loan_applications.csv"
+)
+
+print("✅ Applications CSV Loaded")
+print("Total Records:", len(applications_df))
+
+# OPTIONAL: CLEAN COLUMN NAMES
+applications_df.columns = [
+    col.strip() for col in applications_df.columns
+]
+
+print(applications_df.columns)
 # =========================================================
 # LOAD CSV FILES
 # =========================================================
