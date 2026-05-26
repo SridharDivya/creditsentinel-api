@@ -379,95 +379,73 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 # APPLICATION LIST ENDPOINT
 # =========================================================
+# =========================================================
+# APPLICATION LIST ENDPOINT
+# =========================================================
 @app.get("/api/applications")
 def get_applications():
 
-    applications = [
+    applications = []
 
-        {
-            "application_id": "APP-000001",
-            "applicant_name": "Rahul Yadav",
+    for _, row in applications_df.iterrows():
 
-            "monthly_income": 55107,
-            "foir": 26.48,
-            "cibil_score": 706,
-            "requested_loan_amount": 390000,
+        application = {
 
-            "risk_score": 0.2145,
-            "risk_tier": "low",
+            # =========================================
+            # REQUIRED FRONTEND FIELDS
+            # =========================================
 
-            "application_status": "approved",
-            "date_applied": "2026-05-20"
-        },
+            "application_id":
+            str(row.get("application_id", "")),
 
-        {
-            "application_id": "APP-000002",
-            "applicant_name": "Priya Sharma",
+            "applicant_name":
+            str(row.get("applicant_name", "")),
 
-            "monthly_income": 43911,
-            "foir": 35.61,
-            "cibil_score": 682,
-            "requested_loan_amount": 150000,
+            # IMPORTANT FIXES
+            "monthly_income":
+            float(row.get("monthly_income", 0)),
 
-            "risk_score": 0.5812,
-            "risk_tier": "medium",
+            "requested_loan_amount":
+            float(row.get(
+                "requested_loan_amount",
+                0
+            )),
 
-            "application_status": "pending",
-            "date_applied": "2026-05-18"
-        },
+            "foir":
+            float(row.get("foir", 0)),
 
-        {
-            "application_id": "APP-000003",
-            "applicant_name": "Amit Kumar",
+            # =========================================
+            # OTHER FIELDS
+            # =========================================
 
-            "monthly_income": 77300,
-            "foir": 35.63,
-            "cibil_score": 721,
-            "requested_loan_amount": 170000,
+            "cibil_score":
+            int(row.get("cibil_score", 0)),
 
-            "risk_score": 0.3411,
-            "risk_tier": "low",
+            "risk_score":
+            float(row.get("risk_score", 0)),
 
-            "application_status": "approved",
-            "date_applied": "2026-05-15"
-        },
+            "risk_tier":
+            str(row.get("risk_tier", "low")),
 
-        {
-            "application_id": "APP-000004",
-            "applicant_name": "Sneha Reddy",
+            "application_status":
+            str(row.get(
+                "application_status",
+                "pending"
+            )),
 
-            "monthly_income": 32000,
-            "foir": 68.20,
-            "cibil_score": 590,
-            "requested_loan_amount": 500000,
-
-            "risk_score": 0.8123,
-            "risk_tier": "high",
-
-            "application_status": "rejected",
-            "date_applied": "2026-05-12"
-        },
-
-        {
-            "application_id": "APP-000005",
-            "applicant_name": "Vikram Singh",
-
-            "monthly_income": 95000,
-            "foir": 42.10,
-            "cibil_score": 745,
-            "requested_loan_amount": 800000,
-
-            "risk_score": 0.6534,
-            "risk_tier": "high",
-
-            "application_status": "pending",
-            "date_applied": "2026-05-10"
+            "date_applied":
+            str(row.get("date_applied", ""))
         }
-    ]
+
+        applications.append(application)
 
     return {
-        "total": len(applications),
-        "applications": applications
+
+        "total":
+        len(applications),
+
+        "applications":
+        applications
     }
 # =========================================================
 # APPLICATION DETAIL
@@ -481,100 +459,59 @@ def get_applications():
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
 
-    applications = {
+    matched = applications_df[
+        applications_df["application_id"]
+        == application_id
+    ]
 
-        "APP-000001": {
-            "application_id": "APP-000001",
-            "applicant_name": "Rahul Yadav",
+    if len(matched) == 0:
 
-            "monthly_income": 55107,
-            "foir": 26.48,
-            "cibil_score": 706,
-            "requested_loan_amount": 390000,
-
-            "risk_score": 0.2145,
-            "risk_tier": "low",
-
-            "application_status": "approved",
-            "date_applied": "2026-05-20"
-        },
-
-        "APP-000002": {
-            "application_id": "APP-000002",
-            "applicant_name": "Priya Sharma",
-
-            "monthly_income": 43911,
-            "foir": 35.61,
-            "cibil_score": 682,
-            "requested_loan_amount": 150000,
-
-            "risk_score": 0.5812,
-            "risk_tier": "medium",
-
-            "application_status": "pending",
-            "date_applied": "2026-05-18"
-        },
-
-        "APP-000003": {
-            "application_id": "APP-000003",
-            "applicant_name": "Amit Kumar",
-
-            "monthly_income": 77300,
-            "foir": 35.63,
-            "cibil_score": 721,
-            "requested_loan_amount": 170000,
-
-            "risk_score": 0.3411,
-            "risk_tier": "low",
-
-            "application_status": "approved",
-            "date_applied": "2026-05-15"
-        },
-
-        "APP-000004": {
-            "application_id": "APP-000004",
-            "applicant_name": "Sneha Reddy",
-
-            "monthly_income": 32000,
-            "foir": 68.20,
-            "cibil_score": 590,
-            "requested_loan_amount": 500000,
-
-            "risk_score": 0.8123,
-            "risk_tier": "high",
-
-            "application_status": "rejected",
-            "date_applied": "2026-05-12"
-        },
-
-        "APP-000005": {
-            "application_id": "APP-000005",
-            "applicant_name": "Vikram Singh",
-
-            "monthly_income": 95000,
-            "foir": 42.10,
-            "cibil_score": 745,
-            "requested_loan_amount": 800000,
-
-            "risk_score": 0.6534,
-            "risk_tier": "high",
-
-            "application_status": "pending",
-            "date_applied": "2026-05-10"
+        return {
+            "error": "Application not found"
         }
-    }
 
-    # =====================================================
-    # RETURN CORRECT APPLICATION
-    # =====================================================
-    if application_id in applications:
-
-        return applications[application_id]
+    row = matched.iloc[0]
 
     return {
-        "error": "Application not found"
-    }
 
+        "application_id":
+        str(row.get("application_id", "")),
+
+        "applicant_name":
+        str(row.get("applicant_name", "")),
+
+        # IMPORTANT FIXES
+        "monthly_income":
+        float(row.get("monthly_income", 0)),
+
+        "requested_loan_amount":
+        float(row.get(
+            "requested_loan_amount",
+            0
+        )),
+
+        "foir":
+        float(row.get("foir", 0)),
+
+        # OTHER FIELDS
+        "cibil_score":
+        int(row.get("cibil_score", 0)),
+
+        "risk_score":
+        float(row.get("risk_score", 0)),
+
+        "risk_tier":
+        str(row.get("risk_tier", "low")),
+
+        "application_status":
+        str(row.get(
+            "application_status",
+            "pending"
+        )),
+
+        "date_applied":
+        str(row.get("date_applied", ""))
+    }
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
