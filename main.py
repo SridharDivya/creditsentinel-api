@@ -351,86 +351,323 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 # APPLICATIONS ENDPOINT
 # =========================================================
+# =========================================================
+# APPLICATION LIST ENDPOINT
+# =========================================================
 @app.get("/api/applications")
 def get_applications():
 
+    applications = [
+
+        {
+            "application_id": "APP-000001",
+            "applicant_name": "Rahul Yadav",
+            "risk_score": 0.2145,
+            "risk_tier": "low",
+            "credit_score": 706,
+            "loan_amount": 390000,
+            "application_status": "approved",
+            "date_applied": "2026-05-20"
+        },
+
+        {
+            "application_id": "APP-000002",
+            "applicant_name": "Priya Sharma",
+            "risk_score": 0.5812,
+            "risk_tier": "medium",
+            "credit_score": 682,
+            "loan_amount": 150000,
+            "application_status": "pending",
+            "date_applied": "2026-05-18"
+        },
+
+        {
+            "application_id": "APP-000003",
+            "applicant_name": "Amit Kumar",
+            "risk_score": 0.3411,
+            "risk_tier": "low",
+            "credit_score": 721,
+            "loan_amount": 170000,
+            "application_status": "approved",
+            "date_applied": "2026-05-15"
+        },
+
+        {
+            "application_id": "APP-000004",
+            "applicant_name": "Sneha Reddy",
+            "risk_score": 0.8123,
+            "risk_tier": "high",
+            "credit_score": 590,
+            "loan_amount": 500000,
+            "application_status": "rejected",
+            "date_applied": "2026-05-12"
+        },
+
+        {
+            "application_id": "APP-000005",
+            "applicant_name": "Vikram Singh",
+            "risk_score": 0.6534,
+            "risk_tier": "high",
+            "credit_score": 745,
+            "loan_amount": 800000,
+            "application_status": "pending",
+            "date_applied": "2026-05-10"
+        }
+    ]
+
     return {
-
-        "total": 5,
-
-        "applications": [
-
-            {
-                "application_id": "APP-000001",
-                "applicant_name": "Rahul Yadav"
-            },
-
-            {
-                "application_id": "APP-000002",
-                "applicant_name": "Priya Sharma"
-            },
-
-            {
-                "application_id": "APP-000003",
-                "applicant_name": "Amit Kumar"
-            },
-
-            {
-                "application_id": "APP-000004",
-                "applicant_name": "Sneha Reddy"
-            },
-
-            {
-                "application_id": "APP-000005",
-                "applicant_name": "Vikram Singh"
-            }
-        ]
+        "total": len(applications),
+        "applications": applications
     }
-
 # =========================================================
 # APPLICATION DETAIL
 # =========================================================
+# =========================================================
+# SINGLE APPLICATION DETAIL ENDPOINT
+# =========================================================
 @app.get("/api/applications/{application_id}")
-def get_application_detail(
-    application_id: str
-):
+def get_application_detail(application_id: str):
 
-    red_flags = []
+    applications = {
 
-    if application_id == "APP-000004":
+        "APP-000001": {
+            "application_id": "APP-000001",
+            "applicant_name": "Rahul Yadav",
+            "risk_score": 0.2145,
+            "risk_tier": "low",
+            "credit_score": 706,
+            "loan_amount": 390000,
+            "application_status": "approved",
+            "date_applied": "2026-05-20"
+        },
 
-        red_flags = [
-            "High FOIR",
-            "Low Income",
-            "Large Loan Amount"
-        ]
+        "APP-000002": {
+            "application_id": "APP-000002",
+            "applicant_name": "Priya Sharma",
+            "risk_score": 0.5812,
+            "risk_tier": "medium",
+            "credit_score": 682,
+            "loan_amount": 150000,
+            "application_status": "pending",
+            "date_applied": "2026-05-18"
+        },
+
+        "APP-000003": {
+            "application_id": "APP-000003",
+            "applicant_name": "Amit Kumar",
+            "risk_score": 0.3411,
+            "risk_tier": "low",
+            "credit_score": 721,
+            "loan_amount": 170000,
+            "application_status": "approved",
+            "date_applied": "2026-05-15"
+        },
+
+        "APP-000004": {
+            "application_id": "APP-000004",
+            "applicant_name": "Sneha Reddy",
+            "risk_score": 0.8123,
+            "risk_tier": "high",
+            "credit_score": 590,
+            "loan_amount": 500000,
+            "application_status": "rejected",
+            "date_applied": "2026-05-12"
+        },
+
+        "APP-000005": {
+            "application_id": "APP-000005",
+            "applicant_name": "Vikram Singh",
+            "risk_score": 0.6534,
+            "risk_tier": "high",
+            "credit_score": 745,
+            "loan_amount": 800000,
+            "application_status": "pending",
+            "date_applied": "2026-05-10"
+        }
+    }
+
+    # ==========================================
+    # RETURN MATCHING APPLICATION
+    # ==========================================
+    if application_id in applications:
+
+        return applications[application_id]
 
     return {
-
-        "application_id": application_id,
-        "applicant_name": "Rahul Yadav",
-        "monthly_income": 55107,
-        "requested_loan_amount": 390000,
-        "foir": 26.48,
-        "cibil_score": 706,
-        "employment_type": "Self-Employed",
-        "employment_years": 1.0,
-        "risk_score": 39.2,
-        "risk_tier": "Low",
-        "red_flags": red_flags,
-        "memo_available": False
+        "error": "Application not found"
     }
 
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
+# =========================================================
+# PORTFOLIO SUMMARY ENDPOINT
+# =========================================================
+# =========================================================
+# PORTFOLIO SUMMARY ENDPOINT
+# REAL MODEL-BASED RISK DISTRIBUTION
+# =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
 
-    return {
+    try:
 
-        "total_applications": 15000,
-        "approved": 8200,
-        "rejected": 4100,
-        "pending": 2700
-    }
+        # ============================================
+        # ALL APPLICATION IDS
+        # ============================================
+        application_ids = [
+
+            "APP-000001",
+            "APP-000002",
+            "APP-000003",
+            "APP-000004",
+            "APP-000005"
+        ]
+
+        # ============================================
+        # COUNTERS
+        # ============================================
+        high = 0
+        medium = 0
+        low = 0
+
+        results = []
+
+        # ============================================
+        # LOOP THROUGH APPLICATIONS
+        # ============================================
+        for app_id in application_ids:
+
+            try:
+
+                # ====================================
+                # FETCH FEATURES
+                # ====================================
+                features_dict = compute_features(
+                    app_id
+                )
+
+                # ====================================
+                # GET MODEL FEATURE ORDER
+                # ====================================
+                if hasattr(model, 'feature_names_in_'):
+
+                    model_features = list(
+                        model.feature_names_in_
+                    )
+
+                else:
+
+                    model_features = list(
+                        model.feature_name_
+                    )
+
+                # ====================================
+                # FILTER FEATURES
+                # ====================================
+                features_filtered = {
+
+                    name: features_dict.get(name, 0)
+
+                    for name in model_features
+                }
+
+                # ====================================
+                # CREATE DATAFRAME
+                # ====================================
+                features_df = pd.DataFrame(
+                    [features_filtered]
+                )
+
+                features_df = features_df[
+                    model_features
+                ]
+
+                features_df = features_df.fillna(0)
+
+                features_df = features_df.astype(float)
+
+                # ====================================
+                # PREDICT RISK SCORE
+                # ====================================
+                risk_score = model.predict_proba(
+                    features_df
+                )[:,1][0]
+
+                risk_score = round(
+                    float(risk_score),
+                    4
+                )
+
+                # ====================================
+                # DETERMINE RISK TIER
+                # ====================================
+                if risk_score < 0.4:
+
+                    tier = "low"
+                    low += 1
+
+                elif risk_score < 0.65:
+
+                    tier = "medium"
+                    medium += 1
+
+                else:
+
+                    tier = "high"
+                    high += 1
+
+                # ====================================
+                # STORE RESULT
+                # ====================================
+                results.append({
+
+                    "application_id":
+                    app_id,
+
+                    "risk_score":
+                    risk_score,
+
+                    "risk_tier":
+                    tier
+                })
+
+            except Exception as e:
+
+                results.append({
+
+                    "application_id":
+                    app_id,
+
+                    "error":
+                    str(e)
+                })
+
+        # ============================================
+        # FINAL RESPONSE
+        # ============================================
+        return {
+
+            "total_applications":
+            len(application_ids),
+
+            "high":
+            high,
+
+            "medium":
+            medium,
+
+            "low":
+            low,
+
+            "applications":
+            results
+        }
+
+    except Exception as e:
+
+        return {
+
+            "error":
+            str(e)
+        }
