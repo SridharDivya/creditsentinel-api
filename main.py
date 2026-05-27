@@ -173,38 +173,29 @@ def score_batch(req: BatchScoreRequest):
 # APPLICATIONS LIST
 # =========================================================
 @app.get("/api/applications")
-def get_applications():
+def get_applications(limit: int = 10, offset: int = 0):
     try:
-        applications = []
-
-        for _, row in applications_df.iterrows():
-            app_id = safe_str(row.get("application_id", ""))
-
-            result     = generate_risk_score(app_id)
-            risk_score = result["risk_score"]
-            risk_tier  = result["risk_tier"]
-
-            monthly_income = safe_float(row.get("monthly_income", 0))
-            monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
-
-            applications.append({
-                "application_id":     app_id,
-                "applicant_name":     safe_str(row.get("applicant_name", "")),
-                "foir":               get_foir(monthly_income, monthly_emi),
-                "monthly_income":     monthly_income,
-                "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-                "risk_score":         risk_score,
-                "risk_tier":          risk_tier,
-                "credit_score":       get_credit_score(risk_score),
-                "application_status": get_status(risk_tier)
-            })
-
-        return {"total": len(applications), "applications": applications}
-
+        # For now, just return a hardcoded response to test
+        return {
+            "total": 15000,
+            "applications": [
+                {
+                    "application_id": "APP-000001",
+                    "applicant_name": "Rahul Yadav",
+                    "monthly_income": 55107.0,
+                    "loan_amount": 390000.0,
+                    "foir": 26.48,
+                    "risk_score": 58.1,
+                    "risk_tier": "Medium",
+                    "credit_score": 706,
+                    "application_status": "Pending",
+                    "date_applied": "2026-05-01"
+                }
+            ]
+        }
     except Exception as e:
-        print(traceback.format_exc())
         return {"error": str(e)}
-
+          
 # =========================================================
 # APPLICATION DETAIL
 # =========================================================
