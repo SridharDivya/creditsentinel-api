@@ -286,3 +286,12 @@ def portfolio_summary():
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
+
+@app.get("/")
+def root():
+    return {
+        "name":    "CreditSentinel API",
+        "version": "1.0",
+        "status":  "running",
+        "docs":    "https://creditsentinel-api.onrender.com/docs"
+    }
