@@ -486,61 +486,54 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 
 @app.get("/api/applications")
-def get_applications(limit: int = 100):
+def get_applications():
 
     applications = []
 
-    for _, row in applications_df.head(limit).iterrows():
+    for _, row in applications_df.iterrows():
+
+        app_id = safe_str(row.get("application_id", ""))
+
+        score_result = score_application(
+            ScoreRequest(application_id=app_id)
+        )
+
+        risk_score = safe_float(score_result.get("risk_score", 0))
+        risk_tier  = safe_str(score_result.get("risk_tier", "Unknown"))
+
+        credit_score = int(300 + (1 - risk_score) * 600)
+
+        status_map = {
+            "Low":    "Approved",
+            "Medium": "Under Review",
+            "High":   "Rejected"
+        }
+        application_status = status_map.get(risk_tier, "Pending")
+
+        # ── FOIR Calculation ───────────────────────────────
+        monthly_income = safe_float(row.get("monthly_income", 0))
+        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+
+        if monthly_income > 0:
+            foir = round((monthly_emi / monthly_income) * 100, 2)
+        else:
+            foir = 0.0
 
         applications.append({
-
-            "application_id":
-            safe_str(
-                row.get("application_id", "")
-            ),
-
-            "applicant_name":
-            safe_str(
-                row.get("applicant_name", "")
-            ),
-
-            "monthly_income":
-            safe_float(
-                row.get("monthly_income", 0)
-            ),
-
-            "loan_amount":
-            safe_float(
-                row.get(
-                    "requested_loan_amount",
-                    0
-                )
-            ),
-
-            "credit_score":
-            safe_int(
-                row.get(
-                    "cibil_score",
-                    0
-                )
-            ),
-
-            "application_status":
-            safe_str(
-                row.get(
-                    "application_status",
-                    "Pending"
-                )
-            )
+            "application_id":     app_id,
+            "applicant_name":     safe_str(row.get("applicant_name", "")),
+            "foir":               foir,               # ✅ Added below applicant
+            "monthly_income":     monthly_income,
+            "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
+            "risk_score":         risk_score,
+            "risk_tier":          risk_tier,
+            "credit_score":       credit_score,
+            "application_status": application_status
         })
 
     return {
-
-        "total":
-        len(applications),
-
-        "applications":
-        applications
+        "total":        len(applications),
+        "applications": applications
     }
 
 # =========================================================
