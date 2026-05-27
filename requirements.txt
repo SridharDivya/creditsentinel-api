@@ -5,6 +5,6 @@ numpy
 scikit-learn
 lightgbm
 joblib
+groq
 python-multipart
-pydantic
-python-dotenv
+sqlalchemy
