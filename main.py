@@ -486,12 +486,9 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 
 @app.get("/api/applications")
-def get_applications():
-
+def get_applications(limit: int = 100):
     applications = []
-
-    for _, row in applications_df.iterrows():
-
+    for _, row in applications_df.head(limit).iterrows():
         app_id = safe_str(row.get("application_id", ""))
 
         score_result = score_application(
@@ -522,7 +519,7 @@ def get_applications():
         applications.append({
             "application_id":     app_id,
             "applicant_name":     safe_str(row.get("applicant_name", "")),
-            "foir":               foir,               # ✅ Added below applicant
+            "foir":               foir,
             "monthly_income":     monthly_income,
             "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
             "risk_score":         risk_score,
@@ -532,10 +529,9 @@ def get_applications():
         })
 
     return {
-        "total":        len(applications),
+        "total": len(applications),
         "applications": applications
     }
-
 # =========================================================
 # APPLICATION DETAIL
 # =========================================================
@@ -677,80 +673,42 @@ def get_application_detail(
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
-
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
 
     try:
 
-        # ============================================
-        # CHECK REQUIRED COLUMNS
-        # ============================================
-        if "risk_tier" not in applications_df.columns:
+        high_count   = 0
+        medium_count = 0
+        low_count    = 0
 
-            return {
-                "error":
-                "risk_tier column missing in CSV"
-            }
+        for _, row in applications_df.iterrows():
 
-        # ============================================
-        # CLEAN RISK TIER VALUES
-        # ============================================
-        applications_df["risk_tier"] = (
-            applications_df["risk_tier"]
-            .astype(str)
-            .str.lower()
-        )
+            app_id = safe_str(row.get("application_id", ""))
 
-        # ============================================
-        # COUNT RISK TIERS
-        # ============================================
-        high_count = len(
+            score_result = score_application(
+                ScoreRequest(application_id=app_id)
+            )
 
-            applications_df[
-                applications_df["risk_tier"]
-                == "high"
-            ]
-        )
+            risk_tier = safe_str(
+                score_result.get("risk_tier", "")
+            ).lower()
 
-        medium_count = len(
+            if risk_tier == "high":
+                high_count += 1
+            elif risk_tier == "medium":
+                medium_count += 1
+            elif risk_tier == "low":
+                low_count += 1
 
-            applications_df[
-                applications_df["risk_tier"]
-                == "medium"
-            ]
-        )
-
-        low_count = len(
-
-            applications_df[
-                applications_df["risk_tier"]
-                == "low"
-            ]
-        )
-
-        # ============================================
-        # RETURN RESPONSE
-        # ============================================
         return {
-
-            "total_applications":
-            len(applications_df),
-
-            "high":
-            high_count,
-
-            "medium":
-            medium_count,
-
-            "low":
-            low_count
+            "total_applications": len(applications_df),
+            "high":               high_count,
+            "medium":             medium_count,
+            "low":                low_count
         }
 
     except Exception as e:
 
-        return {
-
-            "error":
-            str(e)
-        }
+        print(traceback.format_exc())
+        return {"error": str(e)}
