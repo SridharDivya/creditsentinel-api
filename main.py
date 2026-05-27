@@ -690,51 +690,71 @@ def portfolio_summary():
 
     try:
 
-        approved = int(
+        # ============================================
+        # CHECK REQUIRED COLUMNS
+        # ============================================
+        if "risk_tier" not in applications_df.columns:
 
-            (
-                applications_df[
-                    "application_status"
-                ] == "Approved"
-            ).sum()
+            return {
+                "error":
+                "risk_tier column missing in CSV"
+            }
+
+        # ============================================
+        # CLEAN RISK TIER VALUES
+        # ============================================
+        applications_df["risk_tier"] = (
+            applications_df["risk_tier"]
+            .astype(str)
+            .str.lower()
         )
 
-        rejected = int(
+        # ============================================
+        # COUNT RISK TIERS
+        # ============================================
+        high_count = len(
 
-            (
-                applications_df[
-                    "application_status"
-                ] == "Rejected"
-            ).sum()
+            applications_df[
+                applications_df["risk_tier"]
+                == "high"
+            ]
         )
 
-        pending = int(
+        medium_count = len(
 
-            (
-                applications_df[
-                    "application_status"
-                ] == "Pending"
-            ).sum()
+            applications_df[
+                applications_df["risk_tier"]
+                == "medium"
+            ]
         )
 
+        low_count = len(
+
+            applications_df[
+                applications_df["risk_tier"]
+                == "low"
+            ]
+        )
+
+        # ============================================
+        # RETURN RESPONSE
+        # ============================================
         return {
 
             "total_applications":
             len(applications_df),
 
-            "approved":
-            approved,
+            "high":
+            high_count,
 
-            "rejected":
-            rejected,
+            "medium":
+            medium_count,
 
-            "pending":
-            pending
+            "low":
+            low_count
         }
 
     except Exception as e:
-
-        print(traceback.format_exc())
 
         return {
 
