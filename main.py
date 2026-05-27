@@ -1,10 +1,9 @@
 # =========================================================
-# CREDITSENTINEL FASTAPI - RENDER READY
+# CREDITSENTINEL FASTAPI - RENDER VERSION
 # =========================================================
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import pandas as pd
@@ -12,6 +11,7 @@ import numpy as np
 import joblib
 import os
 import math
+import traceback
 
 from typing import List
 
@@ -25,6 +25,8 @@ BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
+print("BASE DIRECTORY:", BASE_DIR)
+
 # =========================================================
 # LOAD MODEL
 # =========================================================
@@ -36,76 +38,113 @@ model = joblib.load(
     )
 )
 
-print("✅ Real model loaded")
-print(type(model))
+print("✅ Model Loaded")
 
 # =========================================================
 # LOAD CSV FILES
 # =========================================================
 
 bank_df = pd.read_csv(
-    os.path.join(BASE_DIR, "bank_statements.csv")
+    os.path.join(
+        BASE_DIR,
+        "bank_statements.csv"
+    )
 )
 
 bureau_df = pd.read_csv(
-    os.path.join(BASE_DIR, "bureau_data.csv")
+    os.path.join(
+        BASE_DIR,
+        "bureau_data.csv"
+    )
 )
 
 gst_df = pd.read_csv(
-    os.path.join(BASE_DIR, "gst_filings.csv")
+    os.path.join(
+        BASE_DIR,
+        "gst_filings.csv"
+    )
 )
 
 applications_df = pd.read_csv(
-    os.path.join(BASE_DIR, "loan_applications.csv")
+    os.path.join(
+        BASE_DIR,
+        "loan_applications.csv"
+    )
 )
 
-print("✅ CSV files loaded")
+print("✅ CSV Files Loaded")
+
+print("Applications Shape:")
+print(applications_df.shape)
+
+print("Applications Columns:")
+print(applications_df.columns.tolist())
 
 # =========================================================
-# HELPER: SAFELY CONVERT VALUES FOR JSON
+# SAFE HELPER FUNCTIONS
 # =========================================================
 
 def safe_float(val, default=0.0):
-    """Convert to float, replacing NaN/Inf with default."""
+
     try:
+
         result = float(val)
+
         if math.isnan(result) or math.isinf(result):
+
             return default
+
         return result
-    except (TypeError, ValueError):
+
+    except:
+
         return default
 
 
 def safe_int(val, default=0):
-    """Convert to int safely."""
+
     try:
-        f = float(val)
-        if math.isnan(f) or math.isinf(f):
+
+        result = float(val)
+
+        if math.isnan(result) or math.isinf(result):
+
             return default
-        return int(f)
-    except (TypeError, ValueError):
+
+        return int(result)
+
+    except:
+
         return default
 
 
 def safe_str(val, default=""):
-    """Convert to string, replacing NaN with default."""
-    if val is None:
-        return default
-    try:
-        if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-            return default
-        return str(val)
-    except (TypeError, ValueError):
-        return default
 
+    try:
+
+        if val is None:
+
+            return default
+
+        if isinstance(val, float):
+
+            if math.isnan(val) or math.isinf(val):
+
+                return default
+
+        return str(val)
+
+    except:
+
+        return default
 
 # =========================================================
 # FASTAPI APP
 # =========================================================
 
 app = FastAPI(
-    title="Loan Risk Scoring API",
-    description="API for predicting loan application risk tiers",
+    title="CreditSentinel API",
+    description="Loan Risk Scoring API",
     version="1.0"
 )
 
@@ -126,10 +165,12 @@ app.add_middleware(
 # =========================================================
 
 class ScoreRequest(BaseModel):
+
     application_id: str
 
 
 class BatchScoreRequest(BaseModel):
+
     application_ids: List[str]
 
 
@@ -139,12 +180,13 @@ class BatchScoreRequest(BaseModel):
 
 @app.get("/health")
 def health():
+
     return {
+
         "status": "ok",
         "model_loaded": True,
-        "features": 43
+        "applications": len(applications_df)
     }
-
 
 # =========================================================
 # SCORE SINGLE APPLICATION
@@ -155,89 +197,169 @@ def score_application(req: ScoreRequest):
 
     try:
 
-        # STEP 1: COMPUTE FEATURES
-        features_dict = compute_features(req.application_id)
+        if not req.application_id.strip():
 
-        print("\n================================")
-        print("APPLICATION:", req.application_id)
-        print("================================")
-
-        # STEP 2: GET MODEL FEATURES
-        if hasattr(model, "feature_names_in_"):
-            model_features = list(model.feature_names_in_)
-        elif hasattr(model, "feature_name_"):
-            model_features = list(model.feature_name_)
-        else:
             return {
-                "application_id": req.application_id,
-                "model_loaded": False,
-                "error": "Model feature names not found"
+
+                "error":
+                "Invalid application ID"
             }
 
-        print("Model expects:", len(model_features), "features")
+        # =================================================
+        # COMPUTE FEATURES
+        # =================================================
 
-        # STEP 3: FILTER FEATURES
+        features_dict = compute_features(
+            req.application_id
+        )
+
+        # =================================================
+        # MODEL FEATURES
+        # =================================================
+
+        if hasattr(model, "feature_names_in_"):
+
+            model_features = list(
+                model.feature_names_in_
+            )
+
+        elif hasattr(model, "feature_name_"):
+
+            model_features = list(
+                model.feature_name_
+            )
+
+        else:
+
+            return {
+
+                "application_id":
+                req.application_id,
+
+                "error":
+                "Model feature names not found"
+            }
+
+        # =================================================
+        # FILTER FEATURES
+        # =================================================
+
         features_filtered = {
+
             feature: features_dict.get(feature, 0)
+
             for feature in model_features
         }
 
-        # STEP 4: CREATE DATAFRAME
-        features_df = pd.DataFrame([features_filtered])
+        # =================================================
+        # DATAFRAME
+        # =================================================
 
-        # STEP 5: CORRECT FEATURE ORDER
-        features_df = features_df[model_features]
+        features_df = pd.DataFrame(
+            [features_filtered]
+        )
 
-        # STEP 6: CLEAN VALUES (NaN, Inf → 0)
+        features_df = features_df[
+            model_features
+        ]
+
+        # =================================================
+        # CLEAN VALUES
+        # =================================================
+
         features_df = features_df.fillna(0)
-        features_df = features_df.replace([np.inf, -np.inf], 0)
 
-        # STEP 7: CONVERT NUMERIC
+        features_df = features_df.replace(
+            [np.inf, -np.inf],
+            0
+        )
+
+        # =================================================
+        # NUMERIC CONVERSION
+        # =================================================
+
         for col in features_df.columns:
+
             try:
-                features_df[col] = pd.to_numeric(features_df[col], errors="coerce").fillna(0)
-            except Exception:
+
+                features_df[col] = pd.to_numeric(
+                    features_df[col],
+                    errors="coerce"
+                ).fillna(0)
+
+            except:
+
                 pass
 
-        # DEBUG
-        print("\n========== FEATURES ==========")
-        for col in features_df.columns[:10]:
-            print(col, "=", features_df.iloc[0][col])
-        print("==============================")
+        # =================================================
+        # PREDICT
+        # =================================================
 
-        # STEP 8: PREDICT
-        prediction = model.predict_proba(features_df)
-        print("\nPrediction Array:")
-        print(prediction)
+        prediction = model.predict_proba(
+            features_df
+        )
 
-        risk_score = round(float(prediction[:, 1][0]), 4)
+        risk_score = round(
+            float(prediction[:,1][0]),
+            4
+        )
 
-        # STEP 9: RISK TIER
+        # =================================================
+        # RISK TIER
+        # =================================================
+
         if risk_score < 0.4:
+
             tier = "Low"
+
         elif risk_score < 0.65:
+
             tier = "Medium"
+
         else:
+
             tier = "High"
 
+        # =================================================
+        # RESPONSE
+        # =================================================
+
         return {
-            "application_id": req.application_id,
-            "model_loaded": True,
-            "risk_score": risk_score,
-            "risk_tier": tier,
-            "features_used": len(features_df.columns)
+
+            "application_id":
+            req.application_id,
+
+            "model_loaded":
+            True,
+
+            "risk_score":
+            risk_score,
+
+            "risk_tier":
+            tier,
+
+            "features_used":
+            len(features_df.columns)
         }
 
     except Exception as e:
+
+        print(traceback.format_exc())
+
         return {
-            "application_id": req.application_id,
-            "model_loaded": False,
-            "error": str(e)
+
+            "application_id":
+            req.application_id,
+
+            "model_loaded":
+            False,
+
+            "error":
+            str(e)
         }
 
-
 # =========================================================
-# SCORE BATCH APPLICATIONS
+# SCORE BATCH
 # =========================================================
 
 @app.post("/api/score-batch")
@@ -249,136 +371,315 @@ def score_batch(req: BatchScoreRequest):
 
         try:
 
-            features_dict = compute_features(app_id)
+            features_dict = compute_features(
+                app_id
+            )
 
             if hasattr(model, "feature_names_in_"):
-                model_features = list(model.feature_names_in_)
+
+                model_features = list(
+                    model.feature_names_in_
+                )
+
             else:
-                model_features = list(model.feature_name_)
+
+                model_features = list(
+                    model.feature_name_
+                )
 
             features_filtered = {
-                name: features_dict.get(name, 0)
-                for name in model_features
+
+                feature: features_dict.get(feature, 0)
+
+                for feature in model_features
             }
 
-            features_df = pd.DataFrame([features_filtered])
-            features_df = features_df[model_features]
+            features_df = pd.DataFrame(
+                [features_filtered]
+            )
+
+            features_df = features_df[
+                model_features
+            ]
+
             features_df = features_df.fillna(0)
-            features_df = features_df.replace([np.inf, -np.inf], 0)
+
+            features_df = features_df.replace(
+                [np.inf, -np.inf],
+                0
+            )
 
             for col in features_df.columns:
+
                 try:
-                    features_df[col] = pd.to_numeric(features_df[col], errors="coerce").fillna(0)
-                except Exception:
+
+                    features_df[col] = pd.to_numeric(
+                        features_df[col],
+                        errors="coerce"
+                    ).fillna(0)
+
+                except:
+
                     pass
 
+            prediction = model.predict_proba(
+                features_df
+            )
+
             risk_score = round(
-                float(model.predict_proba(features_df)[:, 1][0]),
+                float(prediction[:,1][0]),
                 4
             )
 
             if risk_score < 0.3:
+
                 tier = "Low"
+
             elif risk_score < 0.6:
+
                 tier = "Medium"
+
             else:
+
                 tier = "High"
 
             results.append({
-                "application_id": app_id,
-                "model_loaded": True,
-                "risk_score": risk_score,
-                "risk_tier": tier,
-                "features_used": len(features_filtered)
+
+                "application_id":
+                app_id,
+
+                "model_loaded":
+                True,
+
+                "risk_score":
+                risk_score,
+
+                "risk_tier":
+                tier
             })
 
         except Exception as e:
+
             results.append({
-                "application_id": app_id,
-                "model_loaded": False,
-                "error": str(e)
+
+                "application_id":
+                app_id,
+
+                "model_loaded":
+                False,
+
+                "error":
+                str(e)
             })
 
     return {
-        "total_applications": len(req.application_ids),
-        "results": results
+
+        "total_applications":
+        len(req.application_ids),
+
+        "results":
+        results
     }
 
-
 # =========================================================
-# APPLICATION LIST ENDPOINT  ← FIXED
+# APPLICATION LIST
 # =========================================================
 
 @app.get("/api/applications")
-def get_applications():
+def get_applications(limit: int = 100):
 
     applications = []
 
-    for _, row in applications_df.iterrows():
+    for _, row in applications_df.head(limit).iterrows():
 
-        application = {
-            "application_id":   safe_str(row.get("application_id", "")),
-            "applicant_name":   safe_str(row.get("applicant_name", "")),
-            "monthly_income":   safe_float(row.get("monthly_income", 0)),
-            "loan_amount":      safe_float(row.get("loan_amount", 0)),
-            "foir":             safe_float(row.get("foir", 0)),
-            "risk_score":       safe_float(row.get("risk_score", 0)),
-            "risk_tier":        safe_str(row.get("risk_tier", "Low")),
-            "credit_score":     safe_int(row.get("cibil_score", 0)),
-            "application_status": safe_str(row.get("application_status", "Pending")),
-            "date_applied":     safe_str(row.get("date_applied", ""))
-        }
+        applications.append({
 
-        applications.append(application)
+            "application_id":
+            safe_str(
+                row.get("application_id", "")
+            ),
+
+            "applicant_name":
+            safe_str(
+                row.get("applicant_name", "")
+            ),
+
+            "monthly_income":
+            safe_float(
+                row.get("monthly_income", 0)
+            ),
+
+            "loan_amount":
+            safe_float(
+                row.get(
+                    "requested_loan_amount",
+                    0
+                )
+            ),
+
+            "credit_score":
+            safe_int(
+                row.get(
+                    "cibil_score",
+                    0
+                )
+            ),
+
+            "application_status":
+            safe_str(
+                row.get(
+                    "application_status",
+                    "Pending"
+                )
+            )
+        })
 
     return {
-        "total": len(applications),
-        "applications": applications
+
+        "total":
+        len(applications),
+
+        "applications":
+        applications
     }
 
-
 # =========================================================
-# SINGLE APPLICATION DETAIL ENDPOINT  ← FIXED
+# APPLICATION DETAIL
 # =========================================================
 
 @app.get("/api/applications/{application_id}")
-def get_application_detail(application_id: str):
+def get_application_detail(
+    application_id: str
+):
 
-    matched = applications_df[
-        applications_df["application_id"] == application_id
-    ]
+    try:
 
-    if len(matched) == 0:
-        return {"error": "Application not found"}
+        if "application_id" not in applications_df.columns:
 
-    row = matched.iloc[0]
+            return {
 
-    monthly_income = safe_float(row.get("monthly_income", 0))
-    monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+                "error":
+                "application_id column missing"
+            }
 
-    if monthly_income > 0:
-        foir = round((monthly_emi / monthly_income) * 100, 2)
-    else:
-        foir = 0.0
+        matched = applications_df[
+            applications_df["application_id"]
+            == application_id
+        ]
 
-    # GET LIVE SCORE
-    score_result = score_application(
-        ScoreRequest(application_id=application_id)
-    )
+        if len(matched) == 0:
 
-    return {
-        "application_id":     safe_str(row.get("application_id", "")),
-        "applicant_name":     safe_str(row.get("applicant_name", "")),
-        "monthly_income":     monthly_income,
-        "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-        "foir":               foir,
-        "risk_score":         safe_float(score_result.get("risk_score", 0)),
-        "risk_tier":          safe_str(score_result.get("risk_tier", "Low")),
-        "credit_score":       safe_int(row.get("cibil_score", 0)),
-        "application_status": safe_str(row.get("application_status", "Pending")),
-        "date_applied":       safe_str(row.get("date_applied", ""))
-    }
+            return {
 
+                "error":
+                "Application not found"
+            }
+
+        row = matched.iloc[0]
+
+        monthly_income = safe_float(
+            row.get("monthly_income", 0)
+        )
+
+        monthly_emi = safe_float(
+            row.get(
+                "existing_monthly_emi",
+                0
+            )
+        )
+
+        if monthly_income > 0:
+
+            foir = round(
+                (monthly_emi / monthly_income) * 100,
+                2
+            )
+
+        else:
+
+            foir = 0
+
+        score_result = score_application(
+
+            ScoreRequest(
+                application_id=application_id
+            )
+        )
+
+        return {
+
+            "application_id":
+            safe_str(
+                row.get(
+                    "application_id",
+                    ""
+                )
+            ),
+
+            "applicant_name":
+            safe_str(
+                row.get(
+                    "applicant_name",
+                    ""
+                )
+            ),
+
+            "monthly_income":
+            monthly_income,
+
+            "loan_amount":
+            safe_float(
+                row.get(
+                    "requested_loan_amount",
+                    0
+                )
+            ),
+
+            "foir":
+            foir,
+
+            "risk_score":
+            safe_float(
+                score_result.get(
+                    "risk_score",
+                    0
+                )
+            ),
+
+            "risk_tier":
+            safe_str(
+                score_result.get(
+                    "risk_tier",
+                    "Low"
+                )
+            ),
+
+            "credit_score":
+            safe_int(
+                row.get(
+                    "cibil_score",
+                    0
+                )
+            ),
+
+            "application_status":
+            safe_str(
+                row.get(
+                    "application_status",
+                    "Pending"
+                )
+            )
+        }
+
+    except Exception as e:
+
+        print(traceback.format_exc())
+
+        return {
+
+            "error":
+            str(e)
+        }
 
 # =========================================================
 # PORTFOLIO SUMMARY
@@ -387,13 +688,56 @@ def get_application_detail(application_id: str):
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
 
-    approved = int((applications_df["application_status"] == "Approved").sum())
-    rejected = int((applications_df["application_status"] == "Rejected").sum())
-    pending  = int((applications_df["application_status"] == "Pending").sum())
+    try:
 
-    return {
-        "total_applications": len(applications_df),
-        "approved":  approved,
-        "rejected":  rejected,
-        "pending":   pending
-    }
+        approved = int(
+
+            (
+                applications_df[
+                    "application_status"
+                ] == "Approved"
+            ).sum()
+        )
+
+        rejected = int(
+
+            (
+                applications_df[
+                    "application_status"
+                ] == "Rejected"
+            ).sum()
+        )
+
+        pending = int(
+
+            (
+                applications_df[
+                    "application_status"
+                ] == "Pending"
+            ).sum()
+        )
+
+        return {
+
+            "total_applications":
+            len(applications_df),
+
+            "approved":
+            approved,
+
+            "rejected":
+            rejected,
+
+            "pending":
+            pending
+        }
+
+    except Exception as e:
+
+        print(traceback.format_exc())
+
+        return {
+
+            "error":
+            str(e)
+        }
