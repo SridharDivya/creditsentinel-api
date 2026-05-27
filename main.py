@@ -554,11 +554,13 @@ def get_application_detail(
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
 
+    approved = int((applications_df["application_status"] == "Approved").sum())
+    rejected = int((applications_df["application_status"] == "Rejected").sum())
+    pending  = int((applications_df["application_status"] == "Pending").sum())
+
     return {
-
-        "total_applications": 15000,
-        "approved": 8200,
-        "rejected": 4100,
-        "pending": 2700
+        "total_applications": len(applications_df),
+        "approved":  approved,
+        "rejected":  rejected,
+        "pending":   pending
     }
-
