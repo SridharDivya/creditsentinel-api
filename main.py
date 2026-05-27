@@ -15,7 +15,7 @@ import math
 
 from typing import List
 
-from feature_engine import compute_features, compute_features_batch
+from feature_engine import compute_features
 
 # =========================================================
 # FASTAPI APP
