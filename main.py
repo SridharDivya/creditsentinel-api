@@ -255,7 +255,13 @@ def portfolio_summary():
     try:
         high = medium = low = 0
 
-        for _, row in applications_df.iterrows():
+        # ── Sample 500 instead of 15,000 ──────────────────
+        sample_df = applications_df.sample(
+            n=min(500, len(applications_df)),
+            random_state=42
+        )
+
+        for _, row in sample_df.iterrows():
             app_id = safe_str(row.get("application_id", ""))
             result = generate_risk_score(app_id)
             tier   = result["risk_tier"]
@@ -264,11 +270,17 @@ def portfolio_summary():
             elif tier == "Medium": medium += 1
             else:                  low    += 1
 
+        # ── Scale up to full 15,000 ───────────────────────
+        total      = len(applications_df)
+        sample_size = len(sample_df)
+
+        scale = total / sample_size
+
         return {
-            "total_applications": len(applications_df),
-            "high":   high,
-            "medium": medium,
-            "low":    low
+            "total_applications": total,
+            "high":   round(high   * scale),
+            "medium": round(medium * scale),
+            "low":    round(low    * scale)
         }
 
     except Exception as e:
