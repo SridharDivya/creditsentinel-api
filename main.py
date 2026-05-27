@@ -287,11 +287,4 @@ def portfolio_summary():
         print(traceback.format_exc())
         return {"error": str(e)}
 
-@app.get("/")
-def root():
-    return {
-        "name":    "CreditSentinel API",
-        "version": "1.0",
-        "status":  "running",
-        "docs":    "https://creditsentinel-api.onrender.com/docs"
-    }
+
