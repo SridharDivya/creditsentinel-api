@@ -391,7 +391,7 @@ def get_application_detail(
         ]
 
         # =====================================
-        # NOT FOUND
+        # APPLICATION NOT FOUND
         # =====================================
         if len(matched) == 0:
 
@@ -402,7 +402,7 @@ def get_application_detail(
             }
 
         # =====================================
-        # GET ROW
+        # GET APPLICATION ROW
         # =====================================
         row = matched.iloc[0]
 
@@ -451,7 +451,7 @@ def get_application_detail(
             foir = 0
 
         # =====================================
-        # GENERATE REAL MODEL SCORE
+        # GENERATE MODEL SCORE
         # =====================================
         score_data = generate_risk_score(
             application_id
@@ -464,6 +464,35 @@ def get_application_detail(
         risk_tier = score_data[
             "risk_tier"
         ]
+
+        # =====================================
+        # CREDIT SCORE FIX
+        # =====================================
+        credit_score = 0
+
+        if "cibil_score" in row.index:
+
+            credit_score = safe_int(
+                row["cibil_score"]
+            )
+
+        elif "credit_score" in row.index:
+
+            credit_score = safe_int(
+                row["credit_score"]
+            )
+
+        elif "cibil" in row.index:
+
+            credit_score = safe_int(
+                row["cibil"]
+            )
+
+        elif "bureau_score" in row.index:
+
+            credit_score = safe_int(
+                row["bureau_score"]
+            )
 
         # =====================================
         # APPLICATION STATUS
@@ -494,6 +523,19 @@ def get_application_detail(
             else:
 
                 application_status = "Approved"
+
+        # =====================================
+        # DEBUG
+        # =====================================
+        print(
+            "APPLICATION:",
+            application_id
+        )
+
+        print(
+            "CREDIT SCORE:",
+            credit_score
+        )
 
         # =====================================
         # FINAL RESPONSE
@@ -534,15 +576,7 @@ def get_application_detail(
             foir,
 
             "credit_score":
-            safe_int(
-                row.get(
-                    "cibil_score",
-                    row.get(
-                        "credit_score",
-                        0
-                    )
-                )
-            ),
+            credit_score,
 
             "risk_score":
             risk_score,
