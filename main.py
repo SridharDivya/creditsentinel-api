@@ -331,283 +331,113 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 @app.get("/api/applications")
 def get_applications():
-    applications = db.query(Application).all()
-    
-    results = []
-    for app in applications:
-        # IMPORTANT: Calculate risk_score using your model
-        try:
-            features = extract_features(app)  # Use Praveen's feature_engine
-            risk_prob = model.predict_proba(features)[0][1]
-            risk_score = risk_prob * 100  # Convert to 0-100 scale
-        except:
-            risk_score = 0
-        
-        # Determine risk tier based on score
-        if risk_score >= 70:
-            risk_tier = "High"
-        elif risk_score >= 40:
-            risk_tier = "Medium"
+
+    applications = []
+
+    for _, row in applications_df.iterrows():
+
+        app_id = safe_str(row.get("application_id", ""))
+
+        score_result = score_application(
+            ScoreRequest(application_id=app_id)
+        )
+
+        risk_score = safe_float(score_result.get("risk_score", 0))
+        risk_tier  = safe_str(score_result.get("risk_tier", "Unknown"))
+
+        credit_score = int(300 + (1 - risk_score) * 600)
+
+        status_map = {
+            "Low":    "Approved",
+            "Medium": "Under Review",
+            "High":   "Rejected"
+        }
+        application_status = status_map.get(risk_tier, "Pending")
+
+        # ── FOIR Calculation ───────────────────────────────
+        monthly_income = safe_float(row.get("monthly_income", 0))
+        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+
+        if monthly_income > 0:
+            foir = round((monthly_emi / monthly_income) * 100, 2)
         else:
-            risk_tier = "Low"
-        
-        results.append({
-            "application_id": app.application_id,
-            "applicant_name": app.applicant_name,
-            "monthly_income": app.monthly_income,
-            "loan_amount": app.loan_amount,
-            "foir": app.foir,
-            "risk_score": risk_score,
-            "risk_tier": risk_tier,
-            "credit_score": app.credit_score,
-            "application_status": app.application_status,
-            "date_applied": app.date_applied
+            foir = 0.0
+
+        applications.append({
+            "application_id":     app_id,
+            "applicant_name":     safe_str(row.get("applicant_name", "")),
+            "foir":               foir,               # ✅ Added below applicant
+            "monthly_income":     monthly_income,
+            "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
+            "risk_score":         risk_score,
+            "risk_tier":          risk_tier,
+            "credit_score":       credit_score,
+            "application_status": application_status
         })
-    
+
     return {
-        "total": len(applications),
-        "applications": results
+        "total":        len(applications),
+        "applications": applications
     }
 # =========================================================
 # APPLICATION DETAIL ENDPOINT
 # =========================================================
 @app.get("/api/applications/{application_id}")
-def get_application_detail(
-    application_id: str
-):
+def get_application_detail(application_id: str):
 
     try:
 
-        # =====================================
-        # FIND APPLICATION
-        # =====================================
+        if "application_id" not in applications_df.columns:
+            return {"error": "application_id column missing"}
+
         matched = applications_df[
-
-            applications_df[
-                "application_id"
-            ].astype(str)
-
-            == str(application_id)
+            applications_df["application_id"] == application_id
         ]
 
-        # =====================================
-        # APPLICATION NOT FOUND
-        # =====================================
         if len(matched) == 0:
+            return {"error": "Application not found"}
 
-            return {
-
-                "error":
-                "Application not found"
-            }
-
-        # =====================================
-        # GET APPLICATION ROW
-        # =====================================
         row = matched.iloc[0]
 
-        # =====================================
-        # MONTHLY INCOME
-        # =====================================
-        monthly_income = safe_float(
-            row.get(
-                "monthly_income",
-                row.get(
-                    "annual_income",
-                    0
-                )
-            )
+        # ── FOIR Calculation ──────────────────────────────
+        monthly_income = safe_float(row.get("monthly_income", 0))
+        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+        foir = round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
+
+        # ── ML Score ──────────────────────────────────────
+        score_result = score_application(
+            ScoreRequest(application_id=application_id)
         )
 
-        # =====================================
-        # MONTHLY EMI
-        # =====================================
-        monthly_emi = safe_float(
-            row.get(
-                "existing_monthly_emi",
-                row.get(
-                    "monthly_emi",
-                    0
-                )
-            )
-        )
+        risk_score = safe_float(score_result.get("risk_score", 0))
+        risk_tier  = safe_str(score_result.get("risk_tier", "Unknown"))
 
-        # =====================================
-        # FOIR CALCULATION
-        # =====================================
-        if monthly_income > 0:
+        # ── Credit Score from ML (same formula as list) ───
+        credit_score = int(300 + (1 - risk_score) * 600)  # ✅ ML-derived
 
-            foir = round(
-                (
-                    monthly_emi
-                    /
-                    monthly_income
-                ) * 100,
-                2
-            )
+        # ── Status from risk tier ─────────────────────────
+        status_map = {
+            "Low":    "Approved",
+            "Medium": "Under Review",
+            "High":   "Rejected"
+        }
+        application_status = status_map.get(risk_tier, "Pending")
 
-        else:
-
-            foir = 0
-
-        # =====================================
-        # GENERATE MODEL SCORE
-        # =====================================
-        score_data = generate_risk_score(
-            application_id
-        )
-
-        risk_score = score_data[
-            "risk_score"
-        ]
-
-        risk_tier = score_data[
-            "risk_tier"
-        ]
-
-        # =====================================
-        # CREDIT SCORE FIX
-        # =====================================
-        credit_score = 0
-
-        if "cibil_score" in row.index:
-
-            credit_score = safe_int(
-                row["cibil_score"]
-            )
-
-        elif "credit_score" in row.index:
-
-            credit_score = safe_int(
-                row["credit_score"]
-            )
-
-        elif "cibil" in row.index:
-
-            credit_score = safe_int(
-                row["cibil"]
-            )
-
-        elif "bureau_score" in row.index:
-
-            credit_score = safe_int(
-                row["bureau_score"]
-            )
-
-        # =====================================
-        # APPLICATION STATUS
-        # =====================================
-        application_status = safe_str(
-            row.get(
-                "application_status",
-                row.get(
-                    "status",
-                    ""
-                )
-            )
-        )
-
-        # =====================================
-        # AUTO STATUS LOGIC
-        # =====================================
-        if application_status == "":
-
-            if risk_score >= 0.75:
-
-                application_status = "Rejected"
-
-            elif risk_score >= 0.45:
-
-                application_status = "Pending"
-
-            else:
-
-                application_status = "Approved"
-
-        # =====================================
-        # DEBUG
-        # =====================================
-        print(
-            "APPLICATION:",
-            application_id
-        )
-
-        print(
-            "CREDIT SCORE:",
-            credit_score
-        )
-
-        # =====================================
-        # FINAL RESPONSE
-        # =====================================
         return {
-
-            "application_id":
-            safe_str(
-                row.get(
-                    "application_id",
-                    ""
-                )
-            ),
-
-            "applicant_name":
-            safe_str(
-                row.get(
-                    "applicant_name",
-                    ""
-                )
-            ),
-
-            "monthly_income":
-            monthly_income,
-
-            "loan_amount":
-            safe_float(
-                row.get(
-                    "requested_loan_amount",
-                    row.get(
-                        "loan_amount",
-                        0
-                    )
-                )
-            ),
-
-            "foir":
-            foir,
-
-            "credit_score":
-            credit_score,
-
-            "risk_score":
-            risk_score,
-
-            "risk_tier":
-            risk_tier,
-
-            "application_status":
-            application_status,
-
-            "date_applied":
-            safe_str(
-                row.get(
-                    "date_applied",
-                    row.get(
-                        "created_at",
-                        "2025-05-20"
-                    )
-                )
-            )
+            "application_id":     safe_str(row.get("application_id", "")),
+            "applicant_name":     safe_str(row.get("applicant_name", "")),
+            "monthly_income":     monthly_income,
+            "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
+            "foir":               foir,
+            "risk_score":         risk_score,
+            "risk_tier":          risk_tier,
+            "credit_score":       credit_score,        # ✅ ML-derived, not from CSV
+            "application_status": application_status   # ✅ ML-derived, not from CSV
         }
 
     except Exception as e:
-
         print(traceback.format_exc())
-
-        return {
-
-            "error":
-            str(e)
-        }
+        return {"error": str(e)}
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
