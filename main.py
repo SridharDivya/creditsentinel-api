@@ -330,180 +330,44 @@ def score_batch(req: BatchScoreRequest):
 # APPLICATIONS LIST ENDPOINT
 # =========================================================
 @app.get("/api/applications")
-def get_applications(
-    limit: int = 10,
-    offset: int = 0
-):
-
-    try:
-
-        total = len(applications_df)
-
-        paginated_df = applications_df.iloc[
-            offset : offset + limit
-        ]
-
-        applications = []
-
-        for _, row in paginated_df.iterrows():
-
-            application_id = safe_str(
-                row.get(
-                    "application_id",
-                    ""
-                )
-            )
-
-            # =====================================
-            # MONTHLY INCOME
-            # =====================================
-            monthly_income = safe_float(
-                row.get(
-                    "monthly_income",
-                    row.get(
-                        "annual_income",
-                        0
-                    )
-                )
-            )
-
-            # =====================================
-            # EMI
-            # =====================================
-            monthly_emi = safe_float(
-                row.get(
-                    "existing_monthly_emi",
-                    row.get(
-                        "monthly_emi",
-                        0
-                    )
-                )
-            )
-
-            # =====================================
-            # FOIR
-            # =====================================
-            if monthly_income > 0:
-
-                foir = round(
-                    (
-                        monthly_emi
-                        /
-                        monthly_income
-                    ) * 100,
-                    2
-                )
-
-            else:
-
-                foir = 0
-
-            # =====================================
-            # REAL MODEL SCORE
-            # =====================================
-            score_data = generate_risk_score(
-                application_id
-            )
-
-            applications.append({
-
-                "application_id":
-                application_id,
-
-                "applicant_name":
-                safe_str(
-                    row.get(
-                        "applicant_name",
-                        ""
-                    )
-                ),
-
-                "monthly_income":
-                monthly_income,
-
-                "loan_amount":
-                safe_float(
-                    row.get(
-                        "requested_loan_amount",
-                        row.get(
-                            "loan_amount",
-                            0
-                        )
-                    )
-                ),
-
-                "foir":
-                foir,
-
-                "credit_score":
-                safe_int(
-                    row.get(
-                        "cibil_score",
-                        row.get(
-                            "credit_score",
-                            0
-                        )
-                    )
-                ),
-
-                "risk_score":
-                score_data[
-                    "risk_score"
-                ],
-
-                "risk_tier":
-                score_data[
-                    "risk_tier"
-                ],
-
-                "application_status":
-                safe_str(
-                    row.get(
-                        "application_status",
-                        row.get(
-                            "status",
-                            "Pending"
-                        )
-                    )
-                ),
-
-                "date_applied":
-                safe_str(
-                    row.get(
-                        "date_applied",
-                        row.get(
-                            "created_at",
-                            "2025-05-20"
-                        )
-                    )
-                )
-            })
-
-        return {
-
-            "total":
-            total,
-
-            "limit":
-            limit,
-
-            "offset":
-            offset,
-
-            "applications":
-            applications
-        }
-
-    except Exception as e:
-
-        print(traceback.format_exc())
-
-        return {
-
-            "error":
-            str(e)
-        }
-
+def get_applications():
+    applications = db.query(Application).all()
+    
+    results = []
+    for app in applications:
+        # IMPORTANT: Calculate risk_score using your model
+        try:
+            features = extract_features(app)  # Use Praveen's feature_engine
+            risk_prob = model.predict_proba(features)[0][1]
+            risk_score = risk_prob * 100  # Convert to 0-100 scale
+        except:
+            risk_score = 0
+        
+        # Determine risk tier based on score
+        if risk_score >= 70:
+            risk_tier = "High"
+        elif risk_score >= 40:
+            risk_tier = "Medium"
+        else:
+            risk_tier = "Low"
+        
+        results.append({
+            "application_id": app.application_id,
+            "applicant_name": app.applicant_name,
+            "monthly_income": app.monthly_income,
+            "loan_amount": app.loan_amount,
+            "foir": app.foir,
+            "risk_score": risk_score,
+            "risk_tier": risk_tier,
+            "credit_score": app.credit_score,
+            "application_status": app.application_status,
+            "date_applied": app.date_applied
+        })
+    
+    return {
+        "total": len(applications),
+        "applications": results
+    }
 # =========================================================
 # APPLICATION DETAIL ENDPOINT
 # =========================================================
@@ -514,6 +378,9 @@ def get_application_detail(
 
     try:
 
+        # =====================================
+        # FIND APPLICATION
+        # =====================================
         matched = applications_df[
 
             applications_df[
@@ -523,6 +390,9 @@ def get_application_detail(
             == str(application_id)
         ]
 
+        # =====================================
+        # NOT FOUND
+        # =====================================
         if len(matched) == 0:
 
             return {
@@ -531,6 +401,9 @@ def get_application_detail(
                 "Application not found"
             }
 
+        # =====================================
+        # GET ROW
+        # =====================================
         row = matched.iloc[0]
 
         # =====================================
@@ -547,7 +420,7 @@ def get_application_detail(
         )
 
         # =====================================
-        # EMI
+        # MONTHLY EMI
         # =====================================
         monthly_emi = safe_float(
             row.get(
@@ -560,7 +433,7 @@ def get_application_detail(
         )
 
         # =====================================
-        # FOIR
+        # FOIR CALCULATION
         # =====================================
         if monthly_income > 0:
 
@@ -578,12 +451,53 @@ def get_application_detail(
             foir = 0
 
         # =====================================
-        # REAL MODEL SCORE
+        # GENERATE REAL MODEL SCORE
         # =====================================
         score_data = generate_risk_score(
             application_id
         )
 
+        risk_score = score_data[
+            "risk_score"
+        ]
+
+        risk_tier = score_data[
+            "risk_tier"
+        ]
+
+        # =====================================
+        # APPLICATION STATUS
+        # =====================================
+        application_status = safe_str(
+            row.get(
+                "application_status",
+                row.get(
+                    "status",
+                    ""
+                )
+            )
+        )
+
+        # =====================================
+        # AUTO STATUS LOGIC
+        # =====================================
+        if application_status == "":
+
+            if risk_score >= 0.75:
+
+                application_status = "Rejected"
+
+            elif risk_score >= 0.45:
+
+                application_status = "Pending"
+
+            else:
+
+                application_status = "Approved"
+
+        # =====================================
+        # FINAL RESPONSE
+        # =====================================
         return {
 
             "application_id":
@@ -631,21 +545,13 @@ def get_application_detail(
             ),
 
             "risk_score":
-            score_data["risk_score"],
+            risk_score,
 
             "risk_tier":
-            score_data["risk_tier"],
+            risk_tier,
 
             "application_status":
-            safe_str(
-                row.get(
-                    "application_status",
-                    row.get(
-                        "status",
-                        "Pending"
-                    )
-                )
-            ),
+            application_status,
 
             "date_applied":
             safe_str(
@@ -668,95 +574,36 @@ def get_application_detail(
             "error":
             str(e)
         }
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
-
-    try:
-
-        high = 0
-        medium = 0
-        low = 0
-
-        for _, row in applications_df.iterrows():
-
-            application_id = safe_str(
-                row.get(
-                    "application_id",
-                    ""
-                )
-            )
-
-            score_data = generate_risk_score(
-                application_id
-            )
-
-            risk_tier = score_data[
-                "risk_tier"
-            ]
-
-            if risk_tier == "High":
-
-                high += 1
-
-            elif risk_tier == "Medium":
-
-                medium += 1
-
-            else:
-
-                low += 1
-
-        return {
-
-            "total_applications":
-            len(applications_df),
-
-            "high":
-            high,
-
-            "medium":
-            medium,
-
-            "low":
-            low
-        }
-
-    except Exception as e:
-
-        print(traceback.format_exc())
-
-        return {
-
-            "error":
-            str(e)
-        }
-
-# =========================================================
-# ROOT ENDPOINT
-# =========================================================
-@app.get("/")
-def root():
-
+    # Get all applications
+    applications = db.query(Application).all()
+    
+    total = len(applications)
+    
+    # Count by RISK TIER (not status)
+    high_count = 0
+    medium_count = 0
+    low_count = 0
+    
+    for app in applications:
+        # Use risk_score to determine tier
+        risk_score = app.risk_score if app.risk_score else 0
+        
+        # Define thresholds
+        if risk_score >= 0.7:  # High risk
+            high_count += 1
+        elif risk_score >= 0.4:  # Medium risk
+            medium_count += 1
+        else:  # Low risk (0 to 0.4)
+            low_count += 1
+    
     return {
-
-        "message":
-        "CreditSentinel API Running"
+        "total_applications": total,
+        "high": high_count,
+        "medium": medium_count,
+        "low": low_count
     }
-
-# =========================================================
-# RENDER START COMMAND
-# =========================================================
-# Use this in Render:
-#
-# Start Command:
-# uvicorn main:app --host 0.0.0.0 --port 10000
-#
-# Build Command:
-# pip install -r requirements.txt
-#
-# =========================================================
-  
