@@ -15,7 +15,7 @@ import math
 
 from typing import List
 
-from feature_engine import compute_features
+from feature_engine import compute_features  # ✅ only this
 
 # =========================================================
 # FASTAPI APP
@@ -170,39 +170,25 @@ def score_batch(req: BatchScoreRequest):
     return {"total_applications": len(results), "results": results}
 
 # =========================================================
-# APPLICATIONS LIST — BATCH ML (FAST)
+# APPLICATIONS LIST
 # =========================================================
 @app.get("/api/applications")
 def get_applications():
     try:
-        app_ids = applications_df["application_id"].tolist()
-
-        # ── Batch compute all features at once ────────────
-        all_features = compute_features_batch(app_ids)
-
-        rows = []
-        for app_id in app_ids:
-            f = all_features.get(app_id, {})
-            rows.append({feat: f.get(feat, 0) for feat in MODEL_FEATURES})
-
-        # ── Single model call for ALL apps ────────────────
-        features_df = pd.DataFrame(rows)[MODEL_FEATURES]
-        features_df = features_df.fillna(0).replace([np.inf, -np.inf], 0)
-        for col in features_df.columns:
-            features_df[col] = pd.to_numeric(features_df[col], errors="coerce").fillna(0)
-
-        risk_scores = model.predict_proba(features_df)[:, 1]
-
         applications = []
-        for i, (_, row) in enumerate(applications_df.iterrows()):
-            risk_score = round(float(risk_scores[i]), 4)
-            risk_tier  = get_risk_tier(risk_score)
+
+        for _, row in applications_df.iterrows():
+            app_id = safe_str(row.get("application_id", ""))
+
+            result     = generate_risk_score(app_id)
+            risk_score = result["risk_score"]
+            risk_tier  = result["risk_tier"]
 
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
 
             applications.append({
-                "application_id":     safe_str(row.get("application_id", "")),
+                "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
                 "foir":               get_foir(monthly_income, monthly_emi),
                 "monthly_income":     monthly_income,
@@ -257,36 +243,24 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# PORTFOLIO SUMMARY — FIXED (no db, uses CSV + ML)
+# PORTFOLIO SUMMARY
 # =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     try:
-        app_ids      = applications_df["application_id"].tolist()
-        all_features = compute_features_batch(app_ids)
-
-        rows = []
-        for app_id in app_ids:
-            f = all_features.get(app_id, {})
-            rows.append({feat: f.get(feat, 0) for feat in MODEL_FEATURES})
-
-        # ── Single model call ──────────────────────────────
-        features_df = pd.DataFrame(rows)[MODEL_FEATURES]
-        features_df = features_df.fillna(0).replace([np.inf, -np.inf], 0)
-        for col in features_df.columns:
-            features_df[col] = pd.to_numeric(features_df[col], errors="coerce").fillna(0)
-
-        risk_scores = model.predict_proba(features_df)[:, 1]
-
         high = medium = low = 0
-        for score in risk_scores:
-            tier = get_risk_tier(float(score))
-            if tier == "High":   high   += 1
+
+        for _, row in applications_df.iterrows():
+            app_id = safe_str(row.get("application_id", ""))
+            result = generate_risk_score(app_id)
+            tier   = result["risk_tier"]
+
+            if tier == "High":     high   += 1
             elif tier == "Medium": medium += 1
             else:                  low    += 1
 
         return {
-            "total_applications": len(app_ids),
+            "total_applications": len(applications_df),
             "high":   high,
             "medium": medium,
             "low":    low
