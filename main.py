@@ -15,7 +15,8 @@ import math
 
 from typing import List
 
-from feature_engine import compute_features  # ✅ only this
+from feature_engine import compute_features
+from config import Config  # ✅ Import Config
 
 # =========================================================
 # FASTAPI APP
@@ -34,7 +35,6 @@ app.add_middleware(
 # BASE DIRECTORY & LOAD FILES
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 
 model = joblib.load(os.path.join(BASE_DIR, Config.MODEL_PATH))  # ✅ Using Config
 print("✅ Model Loaded")
@@ -110,7 +110,14 @@ def generate_risk_score(application_id: str) -> dict:
         features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
 
         risk_score = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
-        risk_tier  = get_risk_tier(risk_score)
+
+        # ✅ Using Config.MODEL_THRESHOLD instead of hardcoded value
+        if risk_score < Config.MODEL_THRESHOLD * 0.8:
+            risk_tier = "Low"
+        elif risk_score < Config.MODEL_THRESHOLD * 1.3:
+            risk_tier = "Medium"
+        else:
+            risk_tier = "High"
 
         return {"risk_score": risk_score, "risk_tier": risk_tier}
 
@@ -133,8 +140,10 @@ class BatchScoreRequest(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "model_loaded": True,
+        "status":             "ok",
+        "model_loaded":       True,
+        "model_path":         Config.MODEL_PATH,        # ✅ Exposed via Config
+        "model_threshold":    Config.MODEL_THRESHOLD,   # ✅ Exposed via Config
         "total_applications": len(applications_df)
     }
 
@@ -160,6 +169,10 @@ def score_application(req: ScoreRequest):
 # =========================================================
 @app.post("/api/score-batch")
 def score_batch(req: BatchScoreRequest):
+    # ✅ Using Config.MAX_BATCH_SIZE
+    if len(req.application_ids) > Config.MAX_BATCH_SIZE:
+        return {"error": f"Batch size exceeds limit of {Config.MAX_BATCH_SIZE}"}
+
     results = []
     for app_id in req.application_ids:
         result = generate_risk_score(app_id)
@@ -203,14 +216,14 @@ def get_applications(limit: int = 10, offset: int = 0):
             })
 
         return {
-            "total":        len(applications_df),  # always 15000
+            "total":        len(applications_df),
             "applications": applications
         }
 
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
-          
+
 # =========================================================
 # APPLICATION DETAIL
 # =========================================================
@@ -256,7 +269,6 @@ def portfolio_summary():
     try:
         high = medium = low = 0
 
-        # ── Sample 500 instead of 15,000 ──────────────────
         sample_df = applications_df.sample(
             n=min(500, len(applications_df)),
             random_state=42
@@ -271,11 +283,9 @@ def portfolio_summary():
             elif tier == "Medium": medium += 1
             else:                  low    += 1
 
-        # ── Scale up to full 15,000 ───────────────────────
-        total      = len(applications_df)
+        total       = len(applications_df)
         sample_size = len(sample_df)
-
-        scale = total / sample_size
+        scale       = total / sample_size
 
         return {
             "total_applications": total,
@@ -287,5 +297,4 @@ def portfolio_summary():
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
-
 
