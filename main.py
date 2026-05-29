@@ -35,6 +35,19 @@ app.add_middleware(
 # BASE DIRECTORY & LOAD FILES
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+import pandas as pd
+import numpy as np
+import os
+
+# =========================
+# LOAD DATASETS
+# =========================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+df_loans = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
+df_bank  = pd.read_csv(os.path.join(BASE_DIR, "bank_statements.csv"))
+df_bur   = pd.read_csv(os.path.join(BASE_DIR, "bureau_data.csv"))
+df_gst   = pd.read_csv(os.path.join(BASE_DIR, "gst_filings.csv"))
 
 model = joblib.load(os.path.join(BASE_DIR, Config.MODEL_PATH))  # ✅ Using Config
 print("✅ Model Loaded")
