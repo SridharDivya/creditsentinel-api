@@ -8,3 +8,4 @@ joblib
 groq
 python-multipart
 sqlalchemy
+python-dotenv
