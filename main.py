@@ -35,7 +35,8 @@ app.add_middleware(
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-model = joblib.load(os.path.join(BASE_DIR, "creditsentinel_model_v1.pkl"))
+
+model = joblib.load(os.path.join(BASE_DIR, Config.MODEL_PATH))  # ✅ Using Config
 print("✅ Model Loaded")
 
 applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
