@@ -216,47 +216,112 @@ def get_applications(limit: int = 10, offset: int = 0):
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
+
     try:
-        if "application_id" not in applications_df.columns:
-            return {"error": "application_id column missing"}
 
-        matched = applications_df[applications_df["application_id"].astype(str) == str(application_id)]
-
-        if len(matched) == 0:
-            try:
-                numeric_id = int(application_id)
-                matched = applications_df[applications_df["application_id"] == numeric_id]
-            except ValueError:
-                pass
+        matched = applications_df[
+            applications_df["application_id"].astype(str)
+            == str(application_id)
+        ]
 
         if len(matched) == 0:
-            return {"error": "Application not found"}
+            return {
+                "error": "Application not found"
+            }
 
-        row          = matched.iloc[0]
-        monthly_income = safe_float(row.get("monthly_income", 0))
-        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+        row = matched.iloc[0]
 
-        result     = generate_risk_score(application_id)
-        risk_score = result["risk_score"]
-        risk_tier  = result["risk_tier"]
+        # Monthly Income
+        monthly_income = safe_float(
+            row.get("monthly_income", 0)
+        )
+
+        # EMI
+        monthly_emi = safe_float(
+            row.get("existing_monthly_emi", 0)
+        )
+
+        # FOIR
+        foir = (
+            round((monthly_emi / monthly_income) * 100, 2)
+            if monthly_income > 0
+            else 0
+        )
+
+        # Risk Score from Model
+        score_data = generate_risk_score(
+            application_id
+        )
+
+        risk_score = score_data["risk_score"]
+        risk_tier = score_data["risk_tier"]
+
+        # Credit Score
+        credit_score = safe_int(
+            row.get(
+                "cibil_score",
+                row.get("credit_score", 0)
+            )
+        )
+
+        # Application Status
+        application_status = safe_str(
+            row.get(
+                "application_status",
+                row.get("status", "")
+            )
+        )
+
+        if application_status == "":
+            if risk_score >= 0.75:
+                application_status = "Rejected"
+            elif risk_score >= 0.45:
+                application_status = "Pending"
+            else:
+                application_status = "Approved"
 
         return {
-            "application_id":     safe_str(row.get("application_id", "")),
-            "applicant_name":     safe_str(row.get("applicant_name", "")),
-            "monthly_income":     monthly_income,
-            "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-            "foir":               safe_foir(monthly_income, monthly_emi),
-            "risk_score":         risk_score,
-            "risk_tier":          risk_tier,
-            "credit_score":       get_credit_score(risk_score),
-            "application_status": get_status(risk_tier)
+
+            "application_id": safe_str(
+                row.get("application_id", "")
+            ),
+
+            "applicant_name": safe_str(
+                row.get("applicant_name", "")
+            ),
+
+            "monthly_income": monthly_income,
+
+            "loan_amount": safe_float(
+                row.get(
+                    "requested_loan_amount",
+                    row.get("loan_amount", 0)
+                )
+            ),
+
+            "foir": foir,
+
+            "credit_score": credit_score,
+
+            "risk_score": risk_score,
+
+            "risk_tier": risk_tier,
+
+            "application_status": application_status,
+
+            "date_applied": safe_str(
+                row.get(
+                    "date_applied",
+                    row.get("created_at", "")
+                )
+            )
         }
 
     except Exception as e:
-        print(traceback.format_exc())
-        return {"error": str(e)}
 
-
+        return {
+            "error": str(e)
+        }
 
 # =========================================================
 # PORTFOLIO SUMMARY
