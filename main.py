@@ -214,19 +214,36 @@ def get_applications(limit: int = 10, offset: int = 0):
 # =========================================================
 # APPLICATION DETAIL
 # =========================================================
+from fastapi import FastAPI
+import traceback
+
+app = FastAPI()
+
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
     try:
         if "application_id" not in applications_df.columns:
             return {"error": "application_id column missing"}
 
-        matched = applications_df[applications_df["application_id"] == application_id]
+        matched = applications_df[
+            applications_df["application_id"].astype(str) == str(application_id)
+        ]
+
+        if len(matched) == 0:
+            try:
+                numeric_id = int(application_id)
+                matched = applications_df[
+                    applications_df["application_id"] == numeric_id
+                ]
+            except ValueError:
+                pass
+
         if len(matched) == 0:
             return {"error": "Application not found"}
 
-        row            = matched.iloc[0]
+        row = matched.iloc[0]
         monthly_income = safe_float(row.get("monthly_income", 0))
-        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+        monthly_emi = safe_float(row.get("existing_monthly_emi", 0))
 
         result     = generate_risk_score(application_id)
         risk_score = result["risk_score"]
@@ -237,7 +254,7 @@ def get_application_detail(application_id: str):
             "applicant_name":     safe_str(row.get("applicant_name", "")),
             "monthly_income":     monthly_income,
             "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-            "foir":               get_foir(monthly_income, monthly_emi),
+            "foir":               safe_foir(monthly_income, monthly_emi),
             "risk_score":         risk_score,
             "risk_tier":          risk_tier,
             "credit_score":       get_credit_score(risk_score),
@@ -248,6 +265,15 @@ def get_application_detail(application_id: str):
         print(traceback.format_exc())
         return {"error": str(e)}
 
+
+@app.get("/api/debug/applications")
+def debug_applications():
+    return {
+        "total_rows": len(applications_df),
+        "columns": list(applications_df.columns),
+        "sample_ids": applications_df["application_id"].head(10).tolist()
+            if "application_id" in applications_df.columns else "column missing"
+    }
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
