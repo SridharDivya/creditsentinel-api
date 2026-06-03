@@ -254,34 +254,30 @@ def get_application_detail(application_id: str):
             else 0
         )
 
-        # =====================================================
-        # Risk Score from Model
-        # =====================================================
-        score_data = generate_risk_score(
-            application_id
-        )
+       # =====================================================
+# Risk Score from Model
+# =====================================================
+score_data = generate_risk_score(
+    application_id
+)
 
-        risk_score = score_data["risk_score"]
-        risk_tier = score_data["risk_tier"]
+risk_score = score_data["risk_score"]
+risk_tier = score_data["risk_tier"]
 
-        # =====================================================
-        # CREDIT SCORE (ROBUST VERSION)
-        # =====================================================
-       
-        # =====================================================
+# =====================================================
 # CREDIT SCORE
 # =====================================================
 credit_score = get_credit_score(risk_score)
 
-        # =====================================================
-        # Application Status
-        # =====================================================
-        application_status = safe_str(
-            row.get(
-                "application_status",
-                row.get("status", "")
-            )
-        )
+# =====================================================
+# Application Status
+# =====================================================
+application_status = safe_str(
+    row.get(
+        "application_status",
+        row.get("status", "")
+    )
+
 
         if application_status == "":
 
