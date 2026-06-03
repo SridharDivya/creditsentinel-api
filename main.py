@@ -231,24 +231,32 @@ def get_application_detail(application_id: str):
 
         row = matched.iloc[0]
 
+        # =====================================================
         # Monthly Income
+        # =====================================================
         monthly_income = safe_float(
             row.get("monthly_income", 0)
         )
 
+        # =====================================================
         # EMI
+        # =====================================================
         monthly_emi = safe_float(
             row.get("existing_monthly_emi", 0)
         )
 
+        # =====================================================
         # FOIR
+        # =====================================================
         foir = (
             round((monthly_emi / monthly_income) * 100, 2)
             if monthly_income > 0
             else 0
         )
 
+        # =====================================================
         # Risk Score from Model
+        # =====================================================
         score_data = generate_risk_score(
             application_id
         )
@@ -256,15 +264,41 @@ def get_application_detail(application_id: str):
         risk_score = score_data["risk_score"]
         risk_tier = score_data["risk_tier"]
 
-        # Credit Score
-        credit_score = safe_int(
-            row.get(
-                "cibil_score",
-                row.get("credit_score", 0)
-            )
-        )
+        # =====================================================
+        # CREDIT SCORE (ROBUST VERSION)
+        # =====================================================
+        credit_score = None
 
+        possible_columns = [
+            "cibil_score",
+            "credit_score",
+            "cibil",
+            "bureau_score",
+            "creditScore",
+            "CIBIL Score"
+        ]
+
+        for col in possible_columns:
+
+            if col in row.index:
+
+                value = row[col]
+
+                if pd.notna(value):
+
+                    try:
+                        credit_score = int(float(value))
+                        break
+
+                    except:
+                        pass
+
+        if credit_score is None:
+            credit_score = 0
+
+        # =====================================================
         # Application Status
+        # =====================================================
         application_status = safe_str(
             row.get(
                 "application_status",
@@ -273,13 +307,27 @@ def get_application_detail(application_id: str):
         )
 
         if application_status == "":
+
             if risk_score >= 0.75:
                 application_status = "Rejected"
+
             elif risk_score >= 0.45:
                 application_status = "Pending"
+
             else:
                 application_status = "Approved"
 
+        # =====================================================
+        # DEBUG LOGS (optional)
+        # =====================================================
+        print(
+            f"Application={application_id}, "
+            f"Credit Score={credit_score}"
+        )
+
+        # =====================================================
+        # RESPONSE
+        # =====================================================
         return {
 
             "application_id": safe_str(
@@ -322,7 +370,6 @@ def get_application_detail(application_id: str):
         return {
             "error": str(e)
         }
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
