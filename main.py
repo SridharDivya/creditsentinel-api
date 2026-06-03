@@ -35,12 +35,16 @@ app.add_middleware(
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-
-model=joblib.load(os.path.join(BASE_DIR,"lightgbm_0.8106.pkl"))  # ✅ Using Config
+model = joblib.load(os.path.join(BASE_DIR, "lightgbm_0.8106.pkl"))
 print("✅ Model Loaded")
 
 applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
 print(f"✅ Applications Loaded: {len(applications_df)} rows")
+
+# =========================================================
+# DEBUG: Print available columns once at startup
+# =========================================================
+print(f"✅ CSV Columns: {list(applications_df.columns)}")
 
 # =========================================================
 # MODEL FEATURES (resolved once at startup)
@@ -48,7 +52,7 @@ print(f"✅ Applications Loaded: {len(applications_df)} rows")
 if hasattr(model, "feature_names_in_"):
     MODEL_FEATURES = list(model.feature_names_in_)
 else:
-    MODEL_FEATURES = list(model.feature_name_)
+    MODEL_FEATURES = list(model.feature_name_())
 
 # =========================================================
 # SAFE HELPERS
@@ -86,7 +90,8 @@ def get_risk_tier(risk_score: float) -> str:
     else:
         return "High"
 
-def get_credit_score(risk_score: float) -> int:
+def get_credit_score_from_risk(risk_score: float) -> int:
+    """Derive a realistic credit score from the ML risk score (300–900 range)."""
     return int(300 + (1 - risk_score) * 600)
 
 def get_status(risk_tier: str) -> str:
@@ -98,6 +103,54 @@ def get_status(risk_tier: str) -> str:
 
 def get_foir(monthly_income: float, monthly_emi: float) -> float:
     return round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
+
+# =========================================================
+# CREDIT SCORE RESOLVER
+# Tries to find a real CIBIL/bureau score from the row.
+# Falls back to ML-derived score if not found.
+# =========================================================
+
+# All possible column names your CSV might use — add more if needed
+CIBIL_COLUMN_CANDIDATES = [
+    "cibil_score", "credit_score", "cibil", "bureau_score",
+    "creditScore", "CIBIL Score", "CIBIL_score", "Credit Score",
+    "bureau_credit_score", "score", "fico_score", "credit_rating"
+]
+
+# Resolved at startup — find which column actually exists in the CSV
+CIBIL_COLUMN = None
+for _col in CIBIL_COLUMN_CANDIDATES:
+    if _col in applications_df.columns:
+        CIBIL_COLUMN = _col
+        print(f"✅ Credit score column found: '{CIBIL_COLUMN}'")
+        break
+
+if CIBIL_COLUMN is None:
+    print("⚠️  No credit score column found in CSV — will derive from ML risk score.")
+
+
+def resolve_credit_score(row, risk_score: float) -> int:
+    """
+    Returns the best available credit score for a row.
+    Priority:
+      1. Real CIBIL/bureau column (if found in CSV and value is valid)
+      2. ML-derived score from risk_score (300–900 range)
+    """
+    if CIBIL_COLUMN is not None:
+        val = row.get(CIBIL_COLUMN, None)
+        if val is not None and pd.notna(val):
+            try:
+                score = int(float(val))
+                if 300 <= score <= 900:       # sanity-check valid range
+                    return score
+                elif score > 0:               # out-of-range but non-zero — still use it
+                    return score
+            except:
+                pass
+
+    # Fallback: derive from ML risk score
+    return get_credit_score_from_risk(risk_score)
+
 
 # =========================================================
 # CORE: RUN ML MODEL FOR ONE APPLICATION
@@ -135,7 +188,8 @@ def health():
     return {
         "status": "ok",
         "model_loaded": True,
-        "total_applications": len(applications_df)
+        "total_applications": len(applications_df),
+        "credit_score_column": CIBIL_COLUMN or "derived_from_risk_score"
     }
 
 # =========================================================
@@ -177,7 +231,6 @@ def score_batch(req: BatchScoreRequest):
 def get_applications(limit: int = 10, offset: int = 0):
     try:
         applications = []
-
         subset = applications_df.iloc[offset: offset + limit]
 
         for _, row in subset.iterrows():
@@ -198,12 +251,12 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
-                "credit_score":       get_credit_score(risk_score),
+                "credit_score":       resolve_credit_score(row, risk_score),  # ✅ FIXED
                 "application_status": get_status(risk_tier)
             })
 
         return {
-            "total":        len(applications_df),  # always 15000
+            "total":        len(applications_df),
             "applications": applications
         }
 
@@ -212,164 +265,66 @@ def get_applications(limit: int = 10, offset: int = 0):
         return {"error": str(e)}
 
 
-
-
+# =========================================================
+# APPLICATION DETAIL
+# =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
-
     try:
-
         matched = applications_df[
-            applications_df["application_id"].astype(str)
-            == str(application_id)
+            applications_df["application_id"].astype(str) == str(application_id)
         ]
 
         if len(matched) == 0:
-            return {
-                "error": "Application not found"
-            }
+            return {"error": "Application not found"}
 
         row = matched.iloc[0]
 
-        # =====================================================
-        # Monthly Income
-        # =====================================================
-        monthly_income = safe_float(
-            row.get("monthly_income", 0)
-        )
+        monthly_income = safe_float(row.get("monthly_income", 0))
+        monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
 
-        # =====================================================
-        # EMI
-        # =====================================================
-        monthly_emi = safe_float(
-            row.get("existing_monthly_emi", 0)
-        )
-
-        # =====================================================
-        # FOIR
-        # =====================================================
         foir = (
             round((monthly_emi / monthly_income) * 100, 2)
-            if monthly_income > 0
-            else 0
+            if monthly_income > 0 else 0
         )
 
-        # =====================================================
-        # Risk Score from Model
-        # =====================================================
-        score_data = generate_risk_score(
-            application_id
-        )
-
+        score_data = generate_risk_score(application_id)
         risk_score = score_data["risk_score"]
-        risk_tier = score_data["risk_tier"]
+        risk_tier  = score_data["risk_tier"]
 
-        # =====================================================
-        # CREDIT SCORE (ROBUST VERSION)
-        # =====================================================
-        credit_score = None
+        # ✅ FIXED: use resolver instead of manual column loop
+        credit_score = resolve_credit_score(row, risk_score)
 
-        possible_columns = [
-            "cibil_score",
-            "credit_score",
-            "cibil",
-            "bureau_score",
-            "creditScore",
-            "CIBIL Score"
-        ]
-
-        for col in possible_columns:
-
-            if col in row.index:
-
-                value = row[col]
-
-                if pd.notna(value):
-
-                    try:
-                        credit_score = int(float(value))
-                        break
-
-                    except:
-                        pass
-
-        if credit_score is None:
-            credit_score = 0
-
-        # =====================================================
-        # Application Status
-        # =====================================================
         application_status = safe_str(
-            row.get(
-                "application_status",
-                row.get("status", "")
-            )
+            row.get("application_status", row.get("status", ""))
         )
-
         if application_status == "":
-
             if risk_score >= 0.75:
                 application_status = "Rejected"
-
             elif risk_score >= 0.45:
                 application_status = "Pending"
-
             else:
                 application_status = "Approved"
 
-        # =====================================================
-        # DEBUG LOGS (optional)
-        # =====================================================
-        print(
-            f"Application={application_id}, "
-            f"Credit Score={credit_score}"
-        )
+        print(f"Application={application_id}, Credit Score={credit_score}, Risk={risk_score}")
 
-        # =====================================================
-        # RESPONSE
-        # =====================================================
         return {
-
-            "application_id": safe_str(
-                row.get("application_id", "")
-            ),
-
-            "applicant_name": safe_str(
-                row.get("applicant_name", "")
-            ),
-
-            "monthly_income": monthly_income,
-
-            "loan_amount": safe_float(
-                row.get(
-                    "requested_loan_amount",
-                    row.get("loan_amount", 0)
-                )
-            ),
-
-            "foir": foir,
-
-            "credit_score": credit_score,
-
-            "risk_score": risk_score,
-
-            "risk_tier": risk_tier,
-
+            "application_id":     safe_str(row.get("application_id", "")),
+            "applicant_name":     safe_str(row.get("applicant_name", "")),
+            "monthly_income":     monthly_income,
+            "loan_amount":        safe_float(row.get("requested_loan_amount", row.get("loan_amount", 0))),
+            "foir":               foir,
+            "credit_score":       credit_score,
+            "risk_score":         risk_score,
+            "risk_tier":          risk_tier,
             "application_status": application_status,
-
-            "date_applied": safe_str(
-                row.get(
-                    "date_applied",
-                    row.get("created_at", "")
-                )
-            )
+            "date_applied":       safe_str(row.get("date_applied", row.get("created_at", "")))
         }
 
     except Exception as e:
+        print(traceback.format_exc())
+        return {"error": str(e)}
 
-        return {
-            "error": str(e)
-        }
 
 # =========================================================
 # PORTFOLIO SUMMARY
@@ -379,7 +334,6 @@ def portfolio_summary():
     try:
         high = medium = low = 0
 
-        # ── Sample 500 instead of 15,000 ──────────────────
         sample_df = applications_df.sample(
             n=min(500, len(applications_df)),
             random_state=42
@@ -394,11 +348,9 @@ def portfolio_summary():
             elif tier == "Medium": medium += 1
             else:                  low    += 1
 
-        # ── Scale up to full 15,000 ───────────────────────
-        total      = len(applications_df)
+        total       = len(applications_df)
         sample_size = len(sample_df)
-
-        scale = total / sample_size
+        scale       = total / sample_size
 
         return {
             "total_applications": total,
