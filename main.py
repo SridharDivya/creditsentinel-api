@@ -267,34 +267,11 @@ def get_application_detail(application_id: str):
         # =====================================================
         # CREDIT SCORE (ROBUST VERSION)
         # =====================================================
-        credit_score = None
-
-        possible_columns = [
-            "cibil_score",
-            "credit_score",
-            "cibil",
-            "bureau_score",
-            "creditScore",
-            "CIBIL Score"
-        ]
-
-        for col in possible_columns:
-
-            if col in row.index:
-
-                value = row[col]
-
-                if pd.notna(value):
-
-                    try:
-                        credit_score = int(float(value))
-                        break
-
-                    except:
-                        pass
-
-        if credit_score is None:
-            credit_score = 0
+       
+        # =====================================================
+# CREDIT SCORE
+# =====================================================
+credit_score = get_credit_score(risk_score)
 
         # =====================================================
         # Application Status
