@@ -210,10 +210,10 @@ def get_applications(limit: int = 10, offset: int = 0):
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
-          
-# =========================================================
-# APPLICATION DETAIL
-# =========================================================
+
+
+
+
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
 
@@ -254,30 +254,57 @@ def get_application_detail(application_id: str):
             else 0
         )
 
-       # =====================================================
-# Risk Score from Model
-# =====================================================
-score_data = generate_risk_score(
-    application_id
-)
+        # =====================================================
+        # Risk Score from Model
+        # =====================================================
+        score_data = generate_risk_score(
+            application_id
+        )
 
-risk_score = score_data["risk_score"]
-risk_tier = score_data["risk_tier"]
+        risk_score = score_data["risk_score"]
+        risk_tier = score_data["risk_tier"]
 
-# =====================================================
-# CREDIT SCORE
-# =====================================================
-credit_score = get_credit_score(risk_score)
+        # =====================================================
+        # CREDIT SCORE (ROBUST VERSION)
+        # =====================================================
+        credit_score = None
 
-# =====================================================
-# Application Status
-# =====================================================
-application_status = safe_str(
-    row.get(
-        "application_status",
-        row.get("status", "")
-    )
+        possible_columns = [
+            "cibil_score",
+            "credit_score",
+            "cibil",
+            "bureau_score",
+            "creditScore",
+            "CIBIL Score"
+        ]
 
+        for col in possible_columns:
+
+            if col in row.index:
+
+                value = row[col]
+
+                if pd.notna(value):
+
+                    try:
+                        credit_score = int(float(value))
+                        break
+
+                    except:
+                        pass
+
+        if credit_score is None:
+            credit_score = 0
+
+        # =====================================================
+        # Application Status
+        # =====================================================
+        application_status = safe_str(
+            row.get(
+                "application_status",
+                row.get("status", "")
+            )
+        )
 
         if application_status == "":
 
@@ -343,6 +370,7 @@ application_status = safe_str(
         return {
             "error": str(e)
         }
+
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
