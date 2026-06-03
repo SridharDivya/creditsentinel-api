@@ -252,6 +252,7 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
                 "credit_score":       resolve_credit_score(row, risk_score),  # ✅ FIXED
+                "cibil_score":        resolve_credit_score(row, risk_score),   # ✅ exposed as cibil_score
                 "application_status": get_status(risk_tier)
             })
 
@@ -315,6 +316,7 @@ def get_application_detail(application_id: str):
             "loan_amount":        safe_float(row.get("requested_loan_amount", row.get("loan_amount", 0))),
             "foir":               foir,
             "credit_score":       credit_score,
+            "cibil_score":        credit_score,   # ✅ same value, exposed as cibil_score
             "risk_score":         risk_score,
             "risk_tier":          risk_tier,
             "application_status": application_status,
