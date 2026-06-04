@@ -106,8 +106,19 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
 
 # =========================================================
 # CREDIT SCORE RESOLVER
-# Tries to find a real CIBIL/bureau score from the row.
-# Falls back to ML-derived score if not found.
+#
+# TWO SEPARATE FUNCTIONS — fixes the root cause of the bug:
+#
+#   cibil_score  = raw bureau score read directly from the CSV row
+#                  Returns 0 if the column is missing or value is invalid.
+#                  This is what the Application Detail page should display.
+#
+#   credit_score = ML-derived score calculated from the risk_score
+#                  Always returns a value in the 300–900 range.
+#                  This is what the Risk Score service uses internally.
+#
+# Previously both fields called resolve_credit_score() which returned
+# the same value, causing the "same data for both" symptom you reported.
 # =========================================================
 
 # All possible column names your CSV might use — add more if needed
@@ -117,38 +128,54 @@ CIBIL_COLUMN_CANDIDATES = [
     "bureau_credit_score", "score", "fico_score", "credit_rating"
 ]
 
-# Resolved at startup — find which column actually exists in the CSV
+# Resolved once at startup — find which column actually exists in the CSV
 CIBIL_COLUMN = None
 for _col in CIBIL_COLUMN_CANDIDATES:
     if _col in applications_df.columns:
         CIBIL_COLUMN = _col
-        print(f"✅ Credit score column found: '{CIBIL_COLUMN}'")
+        print(f"✅ CIBIL/bureau score column found: '{CIBIL_COLUMN}'")
         break
 
 if CIBIL_COLUMN is None:
-    print("⚠️  No credit score column found in CSV — will derive from ML risk score.")
+    print("⚠️  No CIBIL/bureau score column found in CSV — cibil_score will be 0.")
 
 
-def resolve_credit_score(row, risk_score: float) -> int:
+def get_raw_cibil_score(row) -> int:
     """
-    Returns the best available credit score for a row.
-    Priority:
-      1. Real CIBIL/bureau column (if found in CSV and value is valid)
-      2. ML-derived score from risk_score (300–900 range)
-    """
-    if CIBIL_COLUMN is not None:
-        val = row.get(CIBIL_COLUMN, None)
-        if val is not None and pd.notna(val):
-            try:
-                score = int(float(val))
-                if 300 <= score <= 900:       # sanity-check valid range
-                    return score
-                elif score > 0:               # out-of-range but non-zero — still use it
-                    return score
-            except:
-                pass
+    Reads the bureau/CIBIL score DIRECTLY from the CSV row.
 
-    # Fallback: derive from ML risk score
+    - Returns the integer score if the column exists and the value is valid.
+    - Returns 0 if the column is missing, null, or non-numeric.
+    - Does NOT fall back to any ML-derived value — keeps the two fields distinct.
+
+    FIX: Previously both cibil_score and credit_score called resolve_credit_score(),
+    which silently replaced a missing/zero CIBIL value with the ML-derived score,
+    making both fields identical and hiding the real data gap.
+    """
+    if CIBIL_COLUMN is None:
+        return 0  # Column doesn't exist in CSV at all
+
+    # ── FIX: pandas Series.get() does NOT work like dict.get() ──────────────
+    # row.get("col", None) on a pandas Series will raise an error or return
+    # unexpected results when the column is missing.  Convert to dict first.
+    row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+    val = row_dict.get(CIBIL_COLUMN, None)
+
+    if val is None or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
+        return 0  # Null / NaN in CSV
+
+    try:
+        score = int(float(val))
+        return score if score > 0 else 0   # treat 0 or negative as missing
+    except (ValueError, TypeError):
+        return 0  # Non-numeric value in CSV
+
+
+def get_ml_credit_score(risk_score: float) -> int:
+    """
+    Returns an ML-derived credit score (300–900) from the model's risk score.
+    This is the score the Risk Score service has always computed correctly.
+    """
     return get_credit_score_from_risk(risk_score)
 
 
@@ -189,7 +216,7 @@ def health():
         "status": "ok",
         "model_loaded": True,
         "total_applications": len(applications_df),
-        "credit_score_column": CIBIL_COLUMN or "derived_from_risk_score"
+        "cibil_score_column": CIBIL_COLUMN or "not_found_in_csv"
     }
 
 # =========================================================
@@ -243,6 +270,9 @@ def get_applications(limit: int = 10, offset: int = 0):
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
 
+            # ── FIX: cibil_score and credit_score are now DIFFERENT values ──
+            # cibil_score  = raw bureau score from the CSV row
+            # credit_score = ML-derived score (300–900) from risk model
             applications.append({
                 "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
@@ -251,8 +281,8 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
-                "credit_score":       resolve_credit_score(row, risk_score),  # ✅ FIXED
-                "cibil_score":        resolve_credit_score(row, risk_score),   # ✅ exposed as cibil_score
+                "cibil_score":        get_raw_cibil_score(row),        # ✅ raw CSV bureau score
+                "credit_score":       get_ml_credit_score(risk_score), # ✅ ML-derived 300–900
                 "application_status": get_status(risk_tier)
             })
 
@@ -293,8 +323,12 @@ def get_application_detail(application_id: str):
         risk_score = score_data["risk_score"]
         risk_tier  = score_data["risk_tier"]
 
-        # ✅ FIXED: use resolver instead of manual column loop
-        credit_score = resolve_credit_score(row, risk_score)
+        # ── FIX: read each score from its correct, dedicated source ─────────
+        # Before this fix, both fields called resolve_credit_score() which
+        # silently replaced a missing/zero CIBIL value with the ML-derived
+        # score, so both fields always showed the same number.
+        cibil_score  = get_raw_cibil_score(row)        # raw CSV bureau score (e.g. 573, 706)
+        credit_score = get_ml_credit_score(risk_score) # ML-derived score (300–900)
 
         application_status = safe_str(
             row.get("application_status", row.get("status", ""))
@@ -307,7 +341,12 @@ def get_application_detail(application_id: str):
             else:
                 application_status = "Approved"
 
-        print(f"Application={application_id}, Credit Score={credit_score}, Risk={risk_score}")
+        print(
+            f"Application={application_id} | "
+            f"CIBIL(raw)={cibil_score} | "
+            f"CreditScore(ML)={credit_score} | "
+            f"Risk={risk_score}"
+        )
 
         return {
             "application_id":     safe_str(row.get("application_id", "")),
@@ -315,8 +354,8 @@ def get_application_detail(application_id: str):
             "monthly_income":     monthly_income,
             "loan_amount":        safe_float(row.get("requested_loan_amount", row.get("loan_amount", 0))),
             "foir":               foir,
-            "credit_score":       credit_score,
-            "cibil_score":        credit_score,   # ✅ same value, exposed as cibil_score
+            "cibil_score":        cibil_score,         # ✅ real bureau score from CSV
+            "credit_score":       credit_score,        # ✅ ML-derived score, always 300–900
             "risk_score":         risk_score,
             "risk_tier":          risk_tier,
             "application_status": application_status,
