@@ -13,9 +13,9 @@ import traceback
 import os
 import math
 
-from typing import List
+from typing import List, Optional
 
-from feature_engine import compute_features  # ✅ only this
+from feature_engine import compute_features
 
 # =========================================================
 # FASTAPI APP
@@ -42,12 +42,61 @@ applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
 print(f"✅ Applications Loaded: {len(applications_df)} rows")
 
 # =========================================================
-# DEBUG: Print available columns once at startup
+# SMART CIBIL COLUMN AUTO-DETECTION
 # =========================================================
-print(f"✅ CSV Columns: {list(applications_df.columns)}")
+# Step 1 — print ALL columns so you can see exactly what's in the CSV
+all_columns = list(applications_df.columns)
+print(f"\n{'='*60}")
+print(f"CSV COLUMNS ({len(all_columns)} total):")
+for i, col in enumerate(all_columns):
+    print(f"  [{i}] '{col}'")
+print(f"{'='*60}\n")
+
+# Step 2 — also print first 3 rows so we can see real values
+print("SAMPLE DATA (first 3 rows):")
+print(applications_df.head(3).to_string())
+print()
+
+# Step 3 — fuzzy CIBIL column detection
+# Checks exact match first, then case-insensitive substring match
+CIBIL_KEYWORDS = ["cibil", "credit_score", "bureau", "fico", "credit_rating", "creditscore", "score"]
+
+CIBIL_COLUMN = None
+
+# Pass 1: exact match against known candidates
+EXACT_CANDIDATES = [
+    "cibil_score", "credit_score", "cibil", "bureau_score",
+    "creditScore", "CIBIL Score", "CIBIL_score", "Credit Score",
+    "bureau_credit_score", "fico_score", "credit_rating",
+    "CreditScore", "CREDIT_SCORE", "CIBIL", "BureauScore"
+]
+for candidate in EXACT_CANDIDATES:
+    if candidate in applications_df.columns:
+        CIBIL_COLUMN = candidate
+        print(f"✅ CIBIL column matched (exact): '{CIBIL_COLUMN}'")
+        break
+
+# Pass 2: case-insensitive keyword scan across ALL columns
+if CIBIL_COLUMN is None:
+    for col in applications_df.columns:
+        col_lower = col.lower().replace(" ", "_").replace("-", "_")
+        for kw in CIBIL_KEYWORDS:
+            if kw in col_lower:
+                CIBIL_COLUMN = col
+                print(f"✅ CIBIL column matched (fuzzy keyword '{kw}'): '{CIBIL_COLUMN}'")
+                break
+        if CIBIL_COLUMN:
+            break
+
+if CIBIL_COLUMN is None:
+    print("⚠️  CIBIL column NOT found. Check /api/debug/columns to see all column names.")
+else:
+    # Print sample values so we can confirm they're real scores
+    sample_vals = applications_df[CIBIL_COLUMN].dropna().head(5).tolist()
+    print(f"   Sample CIBIL values from CSV: {sample_vals}")
 
 # =========================================================
-# MODEL FEATURES (resolved once at startup)
+# MODEL FEATURES
 # =========================================================
 if hasattr(model, "feature_names_in_"):
     MODEL_FEATURES = list(model.feature_names_in_)
@@ -91,7 +140,7 @@ def get_risk_tier(risk_score: float) -> str:
         return "High"
 
 def get_credit_score_from_risk(risk_score: float) -> int:
-    """Derive a realistic credit score from the ML risk score (300–900 range)."""
+    """ML-derived credit score in 300–900 range."""
     return int(300 + (1 - risk_score) * 600)
 
 def get_status(risk_tier: str) -> str:
@@ -105,82 +154,39 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
     return round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
 
 # =========================================================
-# CREDIT SCORE RESOLVER
-#
-# TWO SEPARATE FUNCTIONS — fixes the root cause of the bug:
-#
-#   cibil_score  = raw bureau score read directly from the CSV row
-#                  Returns 0 if the column is missing or value is invalid.
-#                  This is what the Application Detail page should display.
-#
-#   credit_score = ML-derived score calculated from the risk_score
-#                  Always returns a value in the 300–900 range.
-#                  This is what the Risk Score service uses internally.
-#
-# Previously both fields called resolve_credit_score() which returned
-# the same value, causing the "same data for both" symptom you reported.
+# CIBIL SCORE — read raw value from CSV row
 # =========================================================
-
-# All possible column names your CSV might use — add more if needed
-CIBIL_COLUMN_CANDIDATES = [
-    "cibil_score", "credit_score", "cibil", "bureau_score",
-    "creditScore", "CIBIL Score", "CIBIL_score", "Credit Score",
-    "bureau_credit_score", "score", "fico_score", "credit_rating"
-]
-
-# Resolved once at startup — find which column actually exists in the CSV
-CIBIL_COLUMN = None
-for _col in CIBIL_COLUMN_CANDIDATES:
-    if _col in applications_df.columns:
-        CIBIL_COLUMN = _col
-        print(f"✅ CIBIL/bureau score column found: '{CIBIL_COLUMN}'")
-        break
-
-if CIBIL_COLUMN is None:
-    print("⚠️  No CIBIL/bureau score column found in CSV — cibil_score will be 0.")
-
-
 def get_raw_cibil_score(row) -> int:
     """
-    Reads the bureau/CIBIL score DIRECTLY from the CSV row.
-
-    - Returns the integer score if the column exists and the value is valid.
-    - Returns 0 if the column is missing, null, or non-numeric.
-    - Does NOT fall back to any ML-derived value — keeps the two fields distinct.
-
-    FIX: Previously both cibil_score and credit_score called resolve_credit_score(),
-    which silently replaced a missing/zero CIBIL value with the ML-derived score,
-    making both fields identical and hiding the real data gap.
+    Returns the actual bureau/CIBIL score from the CSV row.
+    Returns 0 only if the column genuinely doesn't exist or value is null/invalid.
+    Never substitutes an ML-derived value here.
     """
     if CIBIL_COLUMN is None:
-        return 0  # Column doesn't exist in CSV at all
+        return 0
 
-    # ── FIX: pandas Series.get() does NOT work like dict.get() ──────────────
-    # row.get("col", None) on a pandas Series will raise an error or return
-    # unexpected results when the column is missing.  Convert to dict first.
+    # Always convert to dict to avoid pandas Series.get() quirks
     row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     val = row_dict.get(CIBIL_COLUMN, None)
 
-    if val is None or (isinstance(val, float) and (math.isnan(val) or math.isinf(val))):
-        return 0  # Null / NaN in CSV
-
+    if val is None:
+        return 0
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return 0
     try:
         score = int(float(val))
-        return score if score > 0 else 0   # treat 0 or negative as missing
+        return max(score, 0)
     except (ValueError, TypeError):
-        return 0  # Non-numeric value in CSV
+        return 0
 
 
 def get_ml_credit_score(risk_score: float) -> int:
-    """
-    Returns an ML-derived credit score (300–900) from the model's risk score.
-    This is the score the Risk Score service has always computed correctly.
-    """
+    """ML-derived score (300–900). Always valid."""
     return get_credit_score_from_risk(risk_score)
 
 
 # =========================================================
-# CORE: RUN ML MODEL FOR ONE APPLICATION
+# CORE: RUN ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
     try:
@@ -213,10 +219,59 @@ class BatchScoreRequest(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "model_loaded": True,
-        "total_applications": len(applications_df),
-        "cibil_score_column": CIBIL_COLUMN or "not_found_in_csv"
+        "status":              "ok",
+        "model_loaded":        True,
+        "total_applications":  len(applications_df),
+        "cibil_column_found":  CIBIL_COLUMN or "NOT_FOUND — check /api/debug/columns",
+        "total_csv_columns":   len(applications_df.columns)
+    }
+
+# =========================================================
+# DEBUG: COLUMNS — call this first to find your CIBIL column name
+# =========================================================
+@app.get("/api/debug/columns")
+def debug_columns():
+    """
+    Returns every column in loan_applications.csv with sample values.
+    Use this to verify which column holds your CIBIL/bureau score.
+    """
+    col_info = {}
+    for col in applications_df.columns:
+        sample = applications_df[col].dropna().head(3).tolist()
+        col_info[col] = {
+            "sample_values": sample,
+            "dtype":         str(applications_df[col].dtype),
+            "null_count":    int(applications_df[col].isna().sum())
+        }
+    return {
+        "detected_cibil_column": CIBIL_COLUMN or "NOT_FOUND",
+        "all_columns":           col_info
+    }
+
+# =========================================================
+# DEBUG: SINGLE ROW — inspect raw values for one application
+# =========================================================
+@app.get("/api/debug/application/{application_id}")
+def debug_application(application_id: str):
+    """
+    Returns the raw CSV row for an application so you can see exactly
+    what column names and values exist before any transformation.
+    """
+    matched = applications_df[
+        applications_df["application_id"].astype(str) == str(application_id)
+    ]
+    if len(matched) == 0:
+        return {"error": "Application not found"}
+
+    row = matched.iloc[0]
+    raw_data = {col: (None if (isinstance(val, float) and math.isnan(val)) else val)
+                for col, val in row.to_dict().items()}
+
+    return {
+        "application_id":          application_id,
+        "detected_cibil_column":   CIBIL_COLUMN or "NOT_FOUND",
+        "cibil_value_from_csv":    raw_data.get(CIBIL_COLUMN) if CIBIL_COLUMN else None,
+        "raw_row":                 raw_data
     }
 
 # =========================================================
@@ -270,9 +325,9 @@ def get_applications(limit: int = 10, offset: int = 0):
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
 
-            # ── FIX: cibil_score and credit_score are now DIFFERENT values ──
-            # cibil_score  = raw bureau score from the CSV row
-            # credit_score = ML-derived score (300–900) from risk model
+            cibil_score  = get_raw_cibil_score(row)        # real CSV bureau score
+            credit_score = get_ml_credit_score(risk_score) # ML-derived 300–900
+
             applications.append({
                 "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
@@ -281,8 +336,8 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
-                "cibil_score":        get_raw_cibil_score(row),        # ✅ raw CSV bureau score
-                "credit_score":       get_ml_credit_score(risk_score), # ✅ ML-derived 300–900
+                "cibil_score":        cibil_score,
+                "credit_score":       credit_score,
                 "application_status": get_status(risk_tier)
             })
 
@@ -323,12 +378,8 @@ def get_application_detail(application_id: str):
         risk_score = score_data["risk_score"]
         risk_tier  = score_data["risk_tier"]
 
-        # ── FIX: read each score from its correct, dedicated source ─────────
-        # Before this fix, both fields called resolve_credit_score() which
-        # silently replaced a missing/zero CIBIL value with the ML-derived
-        # score, so both fields always showed the same number.
         cibil_score  = get_raw_cibil_score(row)        # raw CSV bureau score (e.g. 573, 706)
-        credit_score = get_ml_credit_score(risk_score) # ML-derived score (300–900)
+        credit_score = get_ml_credit_score(risk_score) # ML-derived 300–900
 
         application_status = safe_str(
             row.get("application_status", row.get("status", ""))
@@ -342,10 +393,11 @@ def get_application_detail(application_id: str):
                 application_status = "Approved"
 
         print(
-            f"Application={application_id} | "
-            f"CIBIL(raw)={cibil_score} | "
-            f"CreditScore(ML)={credit_score} | "
-            f"Risk={risk_score}"
+            f"[DETAIL] app={application_id} | "
+            f"cibil_col='{CIBIL_COLUMN}' | "
+            f"cibil_raw={cibil_score} | "
+            f"credit_ml={credit_score} | "
+            f"risk={risk_score}"
         )
 
         return {
@@ -354,8 +406,8 @@ def get_application_detail(application_id: str):
             "monthly_income":     monthly_income,
             "loan_amount":        safe_float(row.get("requested_loan_amount", row.get("loan_amount", 0))),
             "foir":               foir,
-            "cibil_score":        cibil_score,         # ✅ real bureau score from CSV
-            "credit_score":       credit_score,        # ✅ ML-derived score, always 300–900
+            "cibil_score":        cibil_score,
+            "credit_score":       credit_score,
             "risk_score":         risk_score,
             "risk_tier":          risk_tier,
             "application_status": application_status,
