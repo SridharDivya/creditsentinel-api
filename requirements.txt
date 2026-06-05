@@ -9,3 +9,4 @@ groq
 python-multipart
 sqlalchemy
 python-dotenv
+psycopg2-binary
