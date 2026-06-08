@@ -473,67 +473,55 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
-async def get_decision_history(application_id: str):
-    """
-    Get decision history for application
-    
-    Response:
-    {
-      "application_id": "APP-005632",
-      "decision_history": [
-        {
-          "audit_id": 1,
-          "decision": "REVIEW",
-          "notes": "Need income verification",
-          "timestamp": "2026-06-08T10:30:00Z"
-        },
-        {
-          "audit_id": 2,
-          "decision": "APPROVE",
-          "notes": "Approved",
-          "timestamp": "2026-06-08T14:15:00Z"
-        }
-      ],
-      "latest_decision": "APPROVE",
-      "latest_timestamp": "2026-06-08T14:15:00Z"
-    }
-    """
-    
+def get_decision_history(application_id: str):
+
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
         query = """
-        SELECT audit_id, decision, decision_notes, timestamp
+        SELECT audit_id,
+               decision,
+               decision_notes,
+               timestamp
         FROM audit_trail
         WHERE application_id = %s
         ORDER BY timestamp DESC
         """
-        
+
         cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
-        
+
+        cursor.close()
+        conn.close()
+
         if not rows:
             return {
                 "application_id": application_id,
                 "decision_history": [],
                 "latest_decision": None,
                 "latest_timestamp": None
-            }, 200
-        
-        history = [
-            {
+            }
+
+        history = []
+
+        for row in rows:
+            history.append({
                 "audit_id": row[0],
                 "decision": row[1],
                 "notes": row[2],
-                "timestamp": row[3].isoformat()
-            }
-            for row in rows
-        ]
-        
+                "timestamp": row[3].isoformat() if row[3] else None
+            })
+
         return {
             "application_id": application_id,
             "decision_history": history,
             "latest_decision": rows[0][1],
             "latest_timestamp": rows[0][3].isoformat()
-        }, 200
-    
+        }
+
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {
+            "error": str(e)
+        }
+      
