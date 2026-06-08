@@ -422,61 +422,50 @@ def portfolio_summary():
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 @app.post("/api/applications/{application_id}/decision")
-async def log_decision(application_id: str, request_body: dict):
-    """
-    Log analyst lending decision
-    
-    Request:
-    {
-      "decision": "APPROVE" | "REJECT" | "REVIEW",
-      "notes": "Optional analyst notes (max 500 chars)",
-      "timestamp": "2026-06-08T10:30:00Z"
-    }
-    
-    Response:
-    {
-      "audit_id": 123,
-      "status": "logged",
-      "message": "Decision recorded"
-    }
-    """
-    
-    # Validate decision
-    if request_body['decision'] not in ['APPROVE', 'REJECT', 'REVIEW']:
-        return {"error": "Invalid decision"}, 400
-    
-    # Validate notes length
-    notes = request_body.get('notes', '')
-    if len(notes) > 500:
-        return {"error": "Notes exceed 500 characters"}, 400
-    
-    # Insert into database
+def log_decision(application_id: str, req: DecisionRequest):
+
+    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
+
+    if req.decision.upper() not in valid_decisions:
+        return {"error": "Invalid decision"}
+
+    notes = req.notes or ""
+
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
         query = """
-        INSERT INTO audit_trail 
+        INSERT INTO audit_trail
         (application_id, decision, decision_notes, timestamp)
-        VALUES (%s, %s, %s, %s)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
         RETURNING audit_id
         """
-        
-        cursor.execute(query, (
-            application_id,
-            request_body['decision'],
-            notes,
-            request_body.get('timestamp', datetime.now())
-        ))
-        
+
+        cursor.execute(
+            query,
+            (
+                application_id,
+                req.decision.upper(),
+                notes
+            )
+        )
+
         audit_id = cursor.fetchone()[0]
-        connection.commit()
-        
+
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
         return {
             "audit_id": audit_id,
             "status": "logged",
-            "message": f"Decision {request_body['decision']} recorded successfully"
-        }, 201
-    
+            "message": "Decision recorded successfully"
+        }
+
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {"error": str(e)}
 
 
 # =========================================================
