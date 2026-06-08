@@ -422,61 +422,61 @@ def portfolio_summary():
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 @app.post("/api/applications/{application_id}/decision")
-def log_decision(application_id: str, req: DecisionRequest):
-
-    # Step 1: Validate decision value
-    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
-    if req.decision.upper() not in valid_decisions:
-        return {"error": "Invalid decision. Must be APPROVE, REJECT, or REVIEW"}
-
-    # Step 2: Validate notes length
-    notes = req.notes or ""
+async def log_decision(application_id: str, request_body: dict):
+    """
+    Log analyst lending decision
+    
+    Request:
+    {
+      "decision": "APPROVE" | "REJECT" | "REVIEW",
+      "notes": "Optional analyst notes (max 500 chars)",
+      "timestamp": "2026-06-08T10:30:00Z"
+    }
+    
+    Response:
+    {
+      "audit_id": 123,
+      "status": "logged",
+      "message": "Decision recorded"
+    }
+    """
+    
+    # Validate decision
+    if request_body['decision'] not in ['APPROVE', 'REJECT', 'REVIEW']:
+        return {"error": "Invalid decision"}, 400
+    
+    # Validate notes length
+    notes = request_body.get('notes', '')
     if len(notes) > 500:
-        return {"error": "Notes exceed 500 characters. Please shorten your notes."}
-
-    # Step 3: Insert into database
+        return {"error": "Notes exceed 500 characters"}, 400
+    
+    # Insert into database
     try:
-        conn   = get_db_connection()
-        cursor = conn.cursor()
-
-        # Parse timestamp if provided, else DB will use CURRENT_TIMESTAMP
-        ts = None
-        if req.timestamp:
-            try:
-                ts = datetime.fromisoformat(req.timestamp.replace("Z", "+00:00"))
-            except Exception:
-                ts = None
-
         query = """
-            INSERT INTO audit_trail (application_id, decision, decision_notes, timestamp)
-            VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP))
-            RETURNING audit_id
+        INSERT INTO audit_trail 
+        (application_id, decision, decision_notes, timestamp)
+        VALUES (%s, %s, %s, %s)
+        RETURNING audit_id
         """
-
+        
         cursor.execute(query, (
             application_id,
-            req.decision.upper(),
+            request_body['decision'],
             notes,
-            ts
+            request_body.get('timestamp', datetime.now())
         ))
-
+        
         audit_id = cursor.fetchone()[0]
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        print(f"[AUDIT] Logged: app={application_id} | decision={req.decision.upper()} | audit_id={audit_id}")
-
-        # Step 4: Return success
+        connection.commit()
+        
         return {
             "audit_id": audit_id,
-            "status":   "logged",
-            "message":  f"Decision {req.decision.upper()} recorded successfully"
-        }
-
+            "status": "logged",
+            "message": f"Decision {request_body['decision']} recorded successfully"
+        }, 201
+    
     except Exception as e:
-        print(traceback.format_exc())
-        return {"error": str(e)}
+        return {"error": str(e)}, 500
 
 
 # =========================================================
@@ -484,51 +484,67 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
-def get_decision_history(application_id: str):
-
+async def get_decision_history(application_id: str):
+    """
+    Get decision history for application
+    
+    Response:
+    {
+      "application_id": "APP-005632",
+      "decision_history": [
+        {
+          "audit_id": 1,
+          "decision": "REVIEW",
+          "notes": "Need income verification",
+          "timestamp": "2026-06-08T10:30:00Z"
+        },
+        {
+          "audit_id": 2,
+          "decision": "APPROVE",
+          "notes": "Approved",
+          "timestamp": "2026-06-08T14:15:00Z"
+        }
+      ],
+      "latest_decision": "APPROVE",
+      "latest_timestamp": "2026-06-08T14:15:00Z"
+    }
+    """
+    
     try:
-        conn   = get_db_connection()
-        cursor = conn.cursor()
-
         query = """
-            SELECT audit_id, decision, decision_notes, timestamp
-            FROM audit_trail
-            WHERE application_id = %s
-            ORDER BY timestamp DESC
+        SELECT audit_id, decision, decision_notes, timestamp
+        FROM audit_trail
+        WHERE application_id = %s
+        ORDER BY timestamp DESC
         """
-
+        
         cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        # No decisions yet — return empty (not an error)
+        
         if not rows:
             return {
-                "application_id":   application_id,
+                "application_id": application_id,
                 "decision_history": [],
-                "latest_decision":  None,
+                "latest_decision": None,
                 "latest_timestamp": None
+            }, 200
+        
+        history = [
+            {
+                "audit_id": row[0],
+                "decision": row[1],
+                "notes": row[2],
+                "timestamp": row[3].isoformat()
             }
-
-        # Build history list
-        history = []
-        for row in rows:
-            history.append({
-                "audit_id":  row[0],
-                "decision":  row[1],
-                "notes":     row[2],
-                "timestamp": row[3].isoformat() if row[3] else None
-            })
-
-        # First row = most recent (ORDER BY timestamp DESC)
+            for row in rows
+        ]
+        
         return {
-            "application_id":   application_id,
+            "application_id": application_id,
             "decision_history": history,
-            "latest_decision":  rows[0][1],
-            "latest_timestamp": rows[0][3].isoformat() if rows[0][3] else None
-        }
-
+            "latest_decision": rows[0][1],
+            "latest_timestamp": rows[0][3].isoformat()
+        }, 200
+    
     except Exception as e:
-        print(traceback.format_exc())
-        return {"error": str(e)}
+        return {"error": str(e)}, 500
