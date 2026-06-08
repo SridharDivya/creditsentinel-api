@@ -1,7 +1,3 @@
-# =========================================================
-# CREDITSENTINEL FASTAPI - RENDER DEPLOYMENT VERSION
-# =========================================================
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,12 +8,25 @@ import joblib
 import traceback
 import os
 import math
-import psycopg2
-from datetime import datetime
 
 from typing import List, Optional
 
 from feature_engine import compute_features
+
+# =========================================================
+# DATABASE CONNECTION (RENDER POSTGRESQL)
+# =========================================================
+import psycopg2
+from fastapi.responses import JSONResponse
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_db_connection():
+    """Establishes a connection to your Render PostgreSQL database."""
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable is missing on Render!")
+    return psycopg2.connect(DATABASE_URL)
+
 
 # =========================================================
 # FASTAPI APP
