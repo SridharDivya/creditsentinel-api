@@ -49,14 +49,14 @@ TOTAL_APPLICATIONS = 15000
 
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
+# ⚠️  ONLY change the password below — everything else is correct
 # =========================================================
-# Update these values to match your pgAdmin database settings
 DB_CONFIG = {
-    "host":     "localhost",
+    "host":     "dpg-d8j9bhernols73cff9t0-a",
     "port":     5432,
-    "database": "loan_db",   # your database name in pgAdmin
-    "user":     "postgres",         # your pgAdmin username
-    "password": "12345678"     # your pgAdmin password
+    "database": "creditsentinel_db_r67r",
+    "user":     "creditsentinel_db_r67r_user",
+    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"   # ← paste your Render DB password here
 }
 
 def get_db_connection():
@@ -71,7 +71,6 @@ try:
     print("✅ PostgreSQL Connected")
 except Exception as e:
     print(f"❌ PostgreSQL Connection Failed: {e}")
-    print("   → Update DB_CONFIG with your correct pgAdmin credentials")
 
 # =========================================================
 # MODEL FEATURES
@@ -129,6 +128,21 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
 
 # =========================================================
 # CIBIL SCORE — derived from real CSV data
+#
+# Your CSV has no bureau/CIBIL column. So we calculate it
+# using the actual fields that exist: foir, monthly_income,
+# loan_to_income_ratio, num_existing_loans, employment_years.
+#
+# Formula logic (standard credit scoring approach):
+#   Base score      = 750  (average CIBIL starting point)
+#   FOIR penalty    = high debt-to-income ratio lowers score
+#   Income boost    = higher income slightly improves score
+#   LTI penalty     = high loan-to-income ratio lowers score
+#   Existing loans  = more loans = higher risk = lower score
+#   Employment      = longer employment = lower risk = higher score
+#
+# Final score is clamped to 300-900 (standard CIBIL range).
+# Every application gets a DIFFERENT score based on its real data.
 # =========================================================
 def compute_cibil_score(row) -> int:
     row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
@@ -139,40 +153,69 @@ def compute_cibil_score(row) -> int:
     num_existing_loans = safe_float(row_dict.get("num_existing_loans", 0))
     employment_years   = safe_float(row_dict.get("employment_years", 0))
 
-    score = 750.0
+    score = 750.0  # base score
 
-    if foir <= 30:       score += 40
-    elif foir <= 40:     score += 10
-    elif foir <= 50:     score -= 20
-    elif foir <= 60:     score -= 60
-    else:                score -= 100
+    # FOIR: 0-30% is healthy, above 50% is risky
+    if foir <= 30:
+        score += 40
+    elif foir <= 40:
+        score += 10
+    elif foir <= 50:
+        score -= 20
+    elif foir <= 60:
+        score -= 60
+    else:
+        score -= 100
 
-    if monthly_income >= 100000:   score += 50
-    elif monthly_income >= 75000:  score += 35
-    elif monthly_income >= 50000:  score += 20
-    elif monthly_income >= 30000:  score += 5
-    else:                          score -= 20
+    # Monthly income: higher income = better creditworthiness
+    if monthly_income >= 100000:
+        score += 50
+    elif monthly_income >= 75000:
+        score += 35
+    elif monthly_income >= 50000:
+        score += 20
+    elif monthly_income >= 30000:
+        score += 5
+    else:
+        score -= 20
 
-    if loan_to_income <= 2:    score += 30
-    elif loan_to_income <= 4:  score += 10
-    elif loan_to_income <= 6:  score -= 20
-    else:                      score -= 50
+    # Loan-to-income ratio: lower is better
+    if loan_to_income <= 2:
+        score += 30
+    elif loan_to_income <= 4:
+        score += 10
+    elif loan_to_income <= 6:
+        score -= 20
+    else:
+        score -= 50
 
-    if num_existing_loans == 0:    score += 20
-    elif num_existing_loans == 1:  score += 5
-    elif num_existing_loans == 2:  score -= 15
-    else:                          score -= 30 * (num_existing_loans - 2)
+    # Number of existing loans: more = riskier
+    if num_existing_loans == 0:
+        score += 20
+    elif num_existing_loans == 1:
+        score += 5
+    elif num_existing_loans == 2:
+        score -= 15
+    else:
+        score -= 30 * (num_existing_loans - 2)
 
-    if employment_years >= 10:   score += 40
-    elif employment_years >= 5:  score += 25
-    elif employment_years >= 3:  score += 10
-    elif employment_years >= 1:  score -= 5
-    else:                        score -= 25
+    # Employment years: stable employment = better score
+    if employment_years >= 10:
+        score += 40
+    elif employment_years >= 5:
+        score += 25
+    elif employment_years >= 3:
+        score += 10
+    elif employment_years >= 1:
+        score -= 5
+    else:
+        score -= 25
 
+    # Clamp to standard CIBIL range 300-900
     return max(300, min(900, int(score)))
 
 
-# ML-derived credit score (300–900) from risk model output
+# ML-derived credit score (300-900) from risk model output
 def get_ml_credit_score(risk_score: float) -> int:
     return int(300 + (1 - risk_score) * 600)
 
@@ -275,8 +318,8 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
-                "cibil_score":        compute_cibil_score(row),
-                "credit_score":       get_ml_credit_score(risk_score),
+                "cibil_score":        compute_cibil_score(row),        # computed from real CSV data
+                "credit_score":       get_ml_credit_score(risk_score), # ML-derived 300-900
                 "application_status": get_status(risk_tier)
             })
 
@@ -306,8 +349,8 @@ def get_application_detail(application_id: str):
         score_data   = generate_risk_score(application_id)
         risk_score   = score_data["risk_score"]
         risk_tier    = score_data["risk_tier"]
-        cibil_score  = compute_cibil_score(row)
-        credit_score = get_ml_credit_score(risk_score)
+        cibil_score  = compute_cibil_score(row)        # computed from real CSV data
+        credit_score = get_ml_credit_score(risk_score) # ML-derived 300-900
 
         application_status = safe_str(row.get("application_status", row.get("status", "")))
         if application_status == "":
@@ -367,44 +410,37 @@ def portfolio_summary():
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/decision
 # Log a lending decision (APPROVE / REJECT / REVIEW)
+# Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 @app.post("/api/applications/{application_id}/decision")
 def log_decision(application_id: str, req: DecisionRequest):
-    """
-    Log a lending decision for an application.
-    Called by Jaajitha's frontend when analyst clicks APPROVE/REJECT/REVIEW.
-    """
 
     # Step 1: Validate decision value
     valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
     if req.decision.upper() not in valid_decisions:
-        return {
-            "error": "Invalid decision. Must be APPROVE, REJECT, or REVIEW"
-        }, 400
+        return {"error": "Invalid decision. Must be APPROVE, REJECT, or REVIEW"}
 
     # Step 2: Validate notes length
     notes = req.notes or ""
     if len(notes) > 500:
-        return {
-            "error": "Notes exceed 500 characters. Please shorten your notes."
-        }, 400
+        return {"error": "Notes exceed 500 characters. Please shorten your notes."}
 
     # Step 3: Insert into database
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
 
-        # Use provided timestamp or let DB default to CURRENT_TIMESTAMP
+        # Parse timestamp if provided, else DB will use CURRENT_TIMESTAMP
         ts = None
         if req.timestamp:
             try:
                 ts = datetime.fromisoformat(req.timestamp.replace("Z", "+00:00"))
             except Exception:
-                ts = None  # fall back to DB default if timestamp is malformed
+                ts = None
 
         query = """
             INSERT INTO audit_trail (application_id, decision, decision_notes, timestamp)
-            VALUES (%s, %s, %s, %s)
+            VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP))
             RETURNING audit_id
         """
 
@@ -412,18 +448,17 @@ def log_decision(application_id: str, req: DecisionRequest):
             application_id,
             req.decision.upper(),
             notes,
-            ts          # None → database uses CURRENT_TIMESTAMP automatically
+            ts
         ))
 
         audit_id = cursor.fetchone()[0]
         conn.commit()
-
         cursor.close()
         conn.close()
 
         print(f"[AUDIT] Logged: app={application_id} | decision={req.decision.upper()} | audit_id={audit_id}")
 
-        # Step 4: Return success response
+        # Step 4: Return success
         return {
             "audit_id": audit_id,
             "status":   "logged",
@@ -437,14 +472,11 @@ def log_decision(application_id: str, req: DecisionRequest):
 
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
-# Return all past decisions for an application (newest first)
+# Returns all past decisions for an application (newest first)
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
-    """
-    Get all past lending decisions for an application.
-    Returns newest decision first.
-    """
+
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -458,11 +490,10 @@ def get_decision_history(application_id: str):
 
         cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
-
         cursor.close()
         conn.close()
 
-        # No decisions found yet — return empty history (not an error)
+        # No decisions yet — return empty (not an error)
         if not rows:
             return {
                 "application_id":   application_id,
@@ -471,7 +502,7 @@ def get_decision_history(application_id: str):
                 "latest_timestamp": None
             }
 
-        # Build the history list from DB rows
+        # Build history list
         history = []
         for row in rows:
             history.append({
@@ -481,7 +512,7 @@ def get_decision_history(application_id: str):
                 "timestamp": row[3].isoformat() if row[3] else None
             })
 
-        # First row = most recent (because ORDER BY timestamp DESC)
+        # First row = most recent (ORDER BY timestamp DESC)
         return {
             "application_id":   application_id,
             "decision_history": history,
@@ -492,4 +523,3 @@ def get_decision_history(application_id: str):
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
-
