@@ -556,3 +556,11 @@ def get_decision_history(application_id: str):
             "error": str(e)
         }
 
+# =========================================================
+# ENTRYPOINT — required for Render deployment
+# Binds to 0.0.0.0 on the PORT env var Render provides.
+# =========================================================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
