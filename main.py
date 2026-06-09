@@ -8,6 +8,7 @@ import joblib
 import traceback
 import os
 import math
+import time                          # ← ADDED for timing logs
 
 from typing import List, Optional
 
@@ -245,6 +246,30 @@ def generate_risk_score(application_id: str) -> dict:
         return {"risk_score": 0.0, "risk_tier": "Low"}
 
 # =========================================================
+# PRE-COMPUTE RISK SCORES ONCE AT STARTUP
+# This runs ONE batch prediction over all rows at startup.
+# The portfolio_summary endpoint reads from this cache
+# instead of calling generate_risk_score() 500 times.
+# =========================================================
+print("⏳ Pre-computing risk scores for all applications...")
+_startup_t0 = time.time()
+
+_all_features = []
+for _, _row in applications_df.iterrows():
+    _app_id = str(_row.get("application_id", ""))
+    _fd = compute_features(_app_id)
+    _all_features.append({f: _fd.get(f, 0) for f in MODEL_FEATURES})
+
+_features_cache_df = pd.DataFrame(_all_features)[MODEL_FEATURES]
+_features_cache_df = _features_cache_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
+
+_all_risk_scores = model.predict_proba(_features_cache_df)[:, 1]
+applications_df["_risk_score"] = _all_risk_scores
+applications_df["_risk_tier"]  = [get_risk_tier(s) for s in _all_risk_scores]
+
+print(f"✅ Risk scores pre-computed in {time.time() - _startup_t0:.2f}s")
+
+# =========================================================
 # REQUEST MODELS
 # =========================================================
 class ScoreRequest(BaseModel):
@@ -388,28 +413,34 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# PORTFOLIO SUMMARY
+# PORTFOLIO SUMMARY  ← FIXED: was 60s, now < 0.01s
+# Old code called generate_risk_score() 500 times in a loop.
+# New code reads from the pre-computed _risk_tier column.
 # =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     try:
-        high = medium = low = 0
-        sample_df = applications_df.sample(n=min(500, len(applications_df)), random_state=42)
+        t_start = time.time()
 
-        for _, row in sample_df.iterrows():
-            app_id = safe_str(row.get("application_id", ""))
-            tier   = generate_risk_score(app_id)["risk_tier"]
-            if tier == "High":     high   += 1
-            elif tier == "Medium": medium += 1
-            else:                  low    += 1
+        # Read pre-computed tiers — zero ML calls, zero loops
+        tier_counts = applications_df["_risk_tier"].value_counts()
 
-        scale = TOTAL_APPLICATIONS / len(sample_df)
+        high   = int(tier_counts.get("High",   0))
+        medium = int(tier_counts.get("Medium", 0))
+        low    = int(tier_counts.get("Low",    0))
+
+        total_computed = high + medium + low
+        scale = TOTAL_APPLICATIONS / total_computed if total_computed > 0 else 1
+
+        elapsed = time.time() - t_start
+        print(f"[PORTFOLIO SUMMARY] query_time={elapsed:.4f}s  high={high}  medium={medium}  low={low}")
 
         return {
             "total_applications": TOTAL_APPLICATIONS,
-            "high":   round(high   * scale),
-            "medium": round(medium * scale),
-            "low":    round(low    * scale)
+            "high":               round(high   * scale),
+            "medium":             round(medium * scale),
+            "low":                round(low    * scale),
+            "query_time_seconds": round(elapsed, 4)
         }
 
     except Exception as e:
@@ -524,4 +555,4 @@ def get_decision_history(application_id: str):
         return {
             "error": str(e)
         }
-      
+
