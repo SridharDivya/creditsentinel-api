@@ -388,33 +388,63 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# PORTFOLIO SUMMARY
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# Returns all past decisions for an application (newest first)
 # =========================================================
-@app.get("/api/portfolio/summary")
-def portfolio_summary():
+@app.get("/api/applications/{application_id}/history")
+def get_decision_history(application_id: str):
+
     try:
-        high = medium = low = 0
-        sample_df = applications_df.sample(n=min(500, len(applications_df)), random_state=42)
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-        for _, row in sample_df.iterrows():
-            app_id = safe_str(row.get("application_id", ""))
-            tier   = generate_risk_score(app_id)["risk_tier"]
-            if tier == "High":     high   += 1
-            elif tier == "Medium": medium += 1
-            else:                  low    += 1
+        query = """
+        SELECT audit_id,
+               decision,
+               decision_notes,
+               timestamp
+        FROM audit_trail
+        WHERE application_id = %s
+        ORDER BY timestamp DESC
+        """
 
-        scale = TOTAL_APPLICATIONS / len(sample_df)
+        cursor.execute(query, (application_id,))
+        rows = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            return {
+                "application_id": application_id,
+                "decision_history": [],
+                "latest_decision": None,
+                "latest_timestamp": None
+            }
+
+        history = []
+
+        for row in rows:
+            history.append({
+                "audit_id": row[0],
+                "decision": row[1],
+                "notes": row[2],
+                "timestamp": row[3].isoformat() if row[3] else None
+            })
 
         return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high":   round(high   * scale),
-            "medium": round(medium * scale),
-            "low":    round(low    * scale)
+            "application_id": application_id,
+            "decision_history": history,
+            "latest_decision": rows[0][1],
+            "latest_timestamp": rows[0][3].isoformat()
         }
 
     except Exception as e:
-        print(traceback.format_exc())
-        return {"error": str(e)}
+        return {
+            "error": str(e)
+        }
+
+
 
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/decision
