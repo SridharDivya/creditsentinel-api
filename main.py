@@ -244,42 +244,6 @@ def generate_risk_score(application_id: str) -> dict:
     except Exception as e:
         print(traceback.format_exc())
         return {"risk_score": 0.0, "risk_tier": "Low"}
-        # =========================================================
-# PRECOMPUTE PORTFOLIO SUMMARY AT STARTUP
-# =========================================================
-print("Precomputing portfolio risk tiers...")
-
-PORTFOLIO_HIGH = 0
-PORTFOLIO_MEDIUM = 0
-PORTFOLIO_LOW = 0
-
-try:
-    for _, row in applications_df.iterrows():
-
-        app_id = safe_str(row.get("application_id", ""))
-
-        result = generate_risk_score(app_id)
-
-        tier = result["risk_tier"]
-
-        if tier == "High":
-            PORTFOLIO_HIGH += 1
-
-        elif tier == "Medium":
-            PORTFOLIO_MEDIUM += 1
-
-        else:
-            PORTFOLIO_LOW += 1
-
-    print(
-        f"Portfolio cached: "
-        f"High={PORTFOLIO_HIGH}, "
-        f"Medium={PORTFOLIO_MEDIUM}, "
-        f"Low={PORTFOLIO_LOW}"
-    )
-
-except Exception:
-    print(traceback.format_exc())
 
 # =========================================================
 # REQUEST MODELS
@@ -534,26 +498,88 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
-
     start = time.time()
+    try:
+        df = applications_df
 
-    elapsed = round(time.time() - start, 4)
+        def get_col(name):
+            if name in df.columns:
+                return pd.to_numeric(df[name], errors="coerce").fillna(0)
+            return pd.Series(0.0, index=df.index)
 
-    print(
-        f"[PORTFOLIO SUMMARY] "
-        f"time={elapsed}s "
-        f"high={PORTFOLIO_HIGH} "
-        f"medium={PORTFOLIO_MEDIUM} "
-        f"low={PORTFOLIO_LOW}"
-    )
+        monthly_income     = get_col("monthly_income")
+        monthly_emi        = get_col("existing_monthly_emi")
+        loan_amount        = get_col("requested_loan_amount")
+        num_existing_loans = get_col("num_existing_loans")
+        employment_years   = get_col("employment_years")
 
-    return {
-        "total_applications": TOTAL_APPLICATIONS,
-        "high": PORTFOLIO_HIGH,
-        "medium": PORTFOLIO_MEDIUM,
-        "low": PORTFOLIO_LOW,
-        "execution_time_seconds": elapsed
-    }
+        # Compute foir and loan_to_income from raw CSV columns (not stored directly)
+        foir           = (monthly_emi / monthly_income.replace(0, np.nan)).fillna(0) * 100
+        loan_to_income = (loan_amount / monthly_income.replace(0, np.nan)).fillna(0)
+
+        # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
+        score = pd.Series(750.0, index=df.index)
+
+        # FOIR
+        score += np.select(
+            [foir <= 30, foir <= 40, foir <= 50, foir <= 60],
+            [40, 10, -20, -60],
+            default=-100
+        )
+
+        # Monthly income
+        score += np.select(
+            [monthly_income >= 100000, monthly_income >= 75000,
+             monthly_income >= 50000,  monthly_income >= 30000],
+            [50, 35, 20, 5],
+            default=-20
+        )
+
+        # Loan-to-income
+        score += np.select(
+            [loan_to_income <= 2, loan_to_income <= 4, loan_to_income <= 6],
+            [30, 10, -20],
+            default=-50
+        )
+
+        # Existing loans
+        extra_penalty = np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
+        score += np.select(
+            [num_existing_loans == 0, num_existing_loans == 1, num_existing_loans == 2],
+            [20, 5, -15],
+            default=extra_penalty
+        )
+
+        # Employment years
+        score += np.select(
+            [employment_years >= 10, employment_years >= 5,
+             employment_years >= 3,  employment_years >= 1],
+            [40, 25, 10, -5],
+            default=-25
+        )
+
+        # Clamp to 300–900
+        score = score.clip(300, 900).astype(int)
+
+        low    = int((score >= 750).sum())
+        medium = int(((score >= 650) & (score < 750)).sum())
+        high   = int((score < 650).sum())
+
+        elapsed = round(time.time() - start, 2)
+        print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
+
+        return {
+            "total_applications": TOTAL_APPLICATIONS,
+            "high":   high,
+            "medium": medium,
+            "low":    low,
+            "execution_time_seconds": elapsed
+        }
+
+    except Exception as e:
+        err = traceback.format_exc()
+        print("PORTFOLIO ERROR:", err)
+        return {"error": str(e), "detail": err}
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
