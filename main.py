@@ -512,41 +512,42 @@ import traceback
 
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
-    start = time.time()
-
     try:
-        high = 0
-        medium = 0
-        low = 0
+        t_start = time.time()
 
-        for _, row in applications_df.iterrows():
+        # Read pre-computed risk tiers
+        tier_counts = applications_df["_risk_tier"].value_counts()
 
-            cibil = compute_cibil_score(row)
+        high = int(tier_counts.get("High", 0))
+        medium = int(tier_counts.get("Medium", 0))
+        low = int(tier_counts.get("Low", 0))
 
-            if cibil >= 750:
-                low += 1
-            elif cibil >= 650:
-                medium += 1
-            else:
-                high += 1
+        elapsed = time.time() - t_start
 
-        elapsed = round(time.time() - start, 2)
-
-        print(f"Portfolio Summary execution time: {elapsed} sec")
+        print(
+            f"[PORTFOLIO SUMMARY] "
+            f"query_time={elapsed:.4f}s "
+            f"high={high} "
+            f"medium={medium} "
+            f"low={low}"
+        )
 
         return {
-            "total_applications": len(applications_df),
+            "total_applications": TOTAL_APPLICATIONS,
             "high": high,
             "medium": medium,
             "low": low,
-            "execution_time_seconds": elapsed
+            "execution_time_seconds": round(elapsed, 4)
         }
 
     except Exception as e:
         print(traceback.format_exc())
+
         return {
             "error": str(e)
         }
+
+         
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
