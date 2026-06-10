@@ -510,13 +510,64 @@ def log_decision(application_id: str, req: DecisionRequest):
 def portfolio_summary():
     start = time.time()
     try:
-        # Vectorized: compute all CIBIL scores at once — no Python loop
-        scores = applications_df.apply(compute_cibil_score, axis=1)
+        df = applications_df
 
-        # Risk tiers based on CIBIL score ranges
-        low    = int((scores >= 750).sum())
-        medium = int(((scores >= 650) & (scores < 750)).sum())
-        high   = int((scores < 650).sum())
+        def get_col(name):
+            if name in df.columns:
+                return pd.to_numeric(df[name], errors="coerce").fillna(0)
+            return pd.Series(0.0, index=df.index)
+
+        foir               = get_col("foir")
+        monthly_income     = get_col("monthly_income")
+        loan_to_income     = get_col("loan_to_income_ratio")
+        num_existing_loans = get_col("num_existing_loans")
+        employment_years   = get_col("employment_years")
+
+        score = pd.Series(750.0, index=df.index)
+
+        # FOIR
+        score += np.select(
+            [foir <= 30, foir <= 40, foir <= 50, foir <= 60],
+            [40, 10, -20, -60],
+            default=-100
+        )
+
+        # Monthly income
+        score += np.select(
+            [monthly_income >= 100000, monthly_income >= 75000,
+             monthly_income >= 50000,  monthly_income >= 30000],
+            [50, 35, 20, 5],
+            default=-20
+        )
+
+        # Loan-to-income
+        score += np.select(
+            [loan_to_income <= 2, loan_to_income <= 4, loan_to_income <= 6],
+            [30, 10, -20],
+            default=-50
+        )
+
+        # Existing loans
+        score += np.select(
+            [num_existing_loans == 0, num_existing_loans == 1, num_existing_loans == 2],
+            [20, 5, -15],
+            default=np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
+        )
+
+        # Employment years
+        score += np.select(
+            [employment_years >= 10, employment_years >= 5,
+             employment_years >= 3,  employment_years >= 1],
+            [40, 25, 10, -5],
+            default=-25
+        )
+
+        # Clamp 300–900
+        score = score.clip(300, 900).astype(int)
+
+        low    = int((score >= 750).sum())
+        medium = int(((score >= 650) & (score < 750)).sum())
+        high   = int((score < 650).sum())
 
         elapsed = round(time.time() - start, 2)
         print(f"Portfolio Summary execution time: {elapsed} sec")
