@@ -391,6 +391,10 @@ def get_application_detail(application_id: str):
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# Returns all past decisions for an application (newest first)
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
 
@@ -451,64 +455,65 @@ def get_decision_history(application_id: str):
 # Log a lending decision (APPROVE / REJECT / REVIEW)
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
-# In your FastAPI main.py
 
-@app.post("/api/applications/{application_id}/decision")
-async def log_decision(application_id: str, request_body: dict):
-    """
-    Log analyst lending decision
-    
-    Request:
-    {
-      "decision": "APPROVE" | "REJECT" | "REVIEW",
-      "notes": "Optional analyst notes (max 500 chars)",
-      "timestamp": "2026-06-08T10:30:00Z"
-    }
-    
-    Response:
-    {
-      "audit_id": 123,
-      "status": "logged",
-      "message": "Decision recorded"
-    }
-    """
-    
-    # Validate decision
-    if request_body['decision'] not in ['APPROVE', 'REJECT', 'REVIEW']:
-        return {"error": "Invalid decision"}, 400
-    
-    # Validate notes length
-    notes = request_body.get('notes', '')
-    if len(notes) > 500:
-        return {"error": "Notes exceed 500 characters"}, 400
-    
-    # Insert into database
+
+
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# Returns all past decisions for an application (newest first)
+# =========================================================
+@app.get("/api/applications/{application_id}/history")
+def get_decision_history(application_id: str):
+
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
         query = """
-        INSERT INTO audit_trail 
-        (application_id, decision, decision_notes, timestamp)
-        VALUES (%s, %s, %s, %s)
-        RETURNING audit_id
+        SELECT audit_id,
+               decision,
+               decision_notes,
+               timestamp
+        FROM audit_trail
+        WHERE application_id = %s
+        ORDER BY timestamp DESC
         """
-        
-        cursor.execute(query, (
-            application_id,
-            request_body['decision'],
-            notes,
-            request_body.get('timestamp', datetime.now())
-        ))
-        
-        audit_id = cursor.fetchone()[0]
-        connection.commit()
-        
+
+        cursor.execute(query, (application_id,))
+        rows = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            return {
+                "application_id": application_id,
+                "decision_history": [],
+                "latest_decision": None,
+                "latest_timestamp": None
+            }
+
+        history = []
+
+        for row in rows:
+            history.append({
+                "audit_id": row[0],
+                "decision": row[1],
+                "notes": row[2],
+                "timestamp": row[3].isoformat() if row[3] else None
+            })
+
         return {
-            "audit_id": audit_id,
-            "status": "logged",
-            "message": f"Decision {request_body['decision']} recorded successfully"
-        }, 201
-    
+            "application_id": application_id,
+            "decision_history": history,
+            "latest_decision": rows[0][1],
+            "latest_timestamp": rows[0][3].isoformat()
+        }
+
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {
+            "error": str(e)
+        }
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
