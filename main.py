@@ -506,47 +506,32 @@ def log_decision(application_id: str, req: DecisionRequest):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
 # Returns all past decisions for an application (newest first)
-import time
-import traceback
-
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
-
     try:
-        high = 0
-        medium = 0
-        low = 0
+        # Vectorized: compute all CIBIL scores at once — no Python loop
+        scores = applications_df.apply(compute_cibil_score, axis=1)
 
-        for _, row in applications_df.iterrows():
-
-            cibil = compute_cibil_score(row)
-
-            if cibil >= 750:
-                low += 1
-            elif cibil >= 650:
-                medium += 1
-            else:
-                high += 1
+        # Risk tiers based on CIBIL score ranges
+        low    = int((scores >= 750).sum())
+        medium = int(((scores >= 650) & (scores < 750)).sum())
+        high   = int((scores < 650).sum())
 
         elapsed = round(time.time() - start, 2)
-
         print(f"Portfolio Summary execution time: {elapsed} sec")
 
         return {
-            "total_applications": len(applications_df),
-            "high": high,
+            "total_applications": TOTAL_APPLICATIONS,
+            "high":   high,
             "medium": medium,
-            "low": low,
+            "low":    low,
             "execution_time_seconds": elapsed
         }
 
     except Exception as e:
         print(traceback.format_exc())
-        return {
-            "error": str(e)
-        }
-         
+        return {"error": str(e)}
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
