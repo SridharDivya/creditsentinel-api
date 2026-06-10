@@ -513,36 +513,15 @@ import traceback
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     try:
-        t_start = time.time()
-
-        # Read pre-computed risk tiers
-        tier_counts = applications_df["_risk_tier"].value_counts()
-
-        high = int(tier_counts.get("High", 0))
-        medium = int(tier_counts.get("Medium", 0))
-        low = int(tier_counts.get("Low", 0))
-
-        elapsed = time.time() - t_start
-
-        print(
-            f"[PORTFOLIO SUMMARY] "
-            f"query_time={elapsed:.4f}s "
-            f"high={high} "
-            f"medium={medium} "
-            f"low={low}"
-        )
+        print("Available Columns:")
+        print(applications_df.columns.tolist())
 
         return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high": high,
-            "medium": medium,
-            "low": low,
-            "execution_time_seconds": round(elapsed, 4)
+            "columns": applications_df.columns.tolist()
         }
 
     except Exception as e:
         print(traceback.format_exc())
-
         return {
             "error": str(e)
         }
