@@ -452,23 +452,49 @@ def get_decision_history(application_id: str):
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 from datetime import datetime
+from fastapi import HTTPException
 
 @app.post("/api/applications/{application_id}/decision")
 async def log_decision(application_id: str, request_body: dict):
 
+    # Check if application exists in CSV
+    matched = applications_df[
+        applications_df["application_id"].astype(str) == str(application_id)
+    ]
+
+    if len(matched) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found"
+        )
+
     # Validate decision
-    if request_body["decision"] not in ["APPROVE", "REJECT", "REVIEW"]:
-        return {"error": "Invalid decision"}
+    decision = request_body.get("decision", "").upper()
+
+    if decision not in ["APPROVE", "REJECT", "REVIEW"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid decision. Allowed values: APPROVE, REJECT, REVIEW"
+        )
 
     # Validate notes length
     notes = request_body.get("notes", "")
 
     if len(notes) > 500:
-        return {"error": "Notes exceed 500 characters"}
+        raise HTTPException(
+            status_code=400,
+            detail="Notes exceed 500 characters"
+        )
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+
+        # Use provided timestamp or current time
+        timestamp = request_body.get("timestamp")
+
+        if not timestamp:
+            timestamp = datetime.now()
 
         query = """
         INSERT INTO audit_trail
@@ -481,9 +507,9 @@ async def log_decision(application_id: str, request_body: dict):
             query,
             (
                 application_id,
-                request_body["decision"],
+                decision,
                 notes,
-                request_body.get("timestamp", datetime.now())
+                timestamp
             )
         )
 
@@ -491,17 +517,26 @@ async def log_decision(application_id: str, request_body: dict):
 
         conn.commit()
 
-        cursor.close()
-        conn.close()
-
         return {
             "audit_id": audit_id,
             "status": "logged",
-            "message": f"Decision {request_body['decision']} recorded successfully"
+            "message": f"Decision {decision} recorded successfully"
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        conn.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+
+        if 'conn' in locals():
+            conn.close()
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
