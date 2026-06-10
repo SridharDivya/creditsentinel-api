@@ -8,6 +8,7 @@ import joblib
 import traceback
 import os
 import math
+import time
 
 from typing import List, Optional
 
@@ -498,87 +499,55 @@ def log_decision(application_id: str, req: DecisionRequest):
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
+
     try:
-        df = applications_df
+        high = 0
+        medium = 0
+        low = 0
 
-        def get_col(name):
-            if name in df.columns:
-                return pd.to_numeric(df[name], errors="coerce").fillna(0)
-            return pd.Series(0.0, index=df.index)
-
-        monthly_income     = get_col("monthly_income")
-        monthly_emi        = get_col("existing_monthly_emi")
-        loan_amount        = get_col("requested_loan_amount")
-        num_existing_loans = get_col("num_existing_loans")
-        employment_years   = get_col("employment_years")
-
-        # Compute foir and loan_to_income from raw CSV columns (not stored directly)
-        foir           = (monthly_emi / monthly_income.replace(0, np.nan)).fillna(0) * 100
-        loan_to_income = (loan_amount / monthly_income.replace(0, np.nan)).fillna(0)
-
-        # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
-        score = pd.Series(750.0, index=df.index)
-
-        # FOIR
-        score += np.select(
-            [foir <= 30, foir <= 40, foir <= 50, foir <= 60],
-            [40, 10, -20, -60],
-            default=-100
+        # Use a sample to avoid 60+ second execution
+        sample_df = applications_df.sample(
+            n=min(500, len(applications_df)),
+            random_state=42
         )
 
-        # Monthly income
-        score += np.select(
-            [monthly_income >= 100000, monthly_income >= 75000,
-             monthly_income >= 50000,  monthly_income >= 30000],
-            [50, 35, 20, 5],
-            default=-20
-        )
+        for _, row in sample_df.iterrows():
 
-        # Loan-to-income
-        score += np.select(
-            [loan_to_income <= 2, loan_to_income <= 4, loan_to_income <= 6],
-            [30, 10, -20],
-            default=-50
-        )
+            app_id = safe_str(row.get("application_id", ""))
 
-        # Existing loans
-        extra_penalty = np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
-        score += np.select(
-            [num_existing_loans == 0, num_existing_loans == 1, num_existing_loans == 2],
-            [20, 5, -15],
-            default=extra_penalty
-        )
+            result = generate_risk_score(app_id)
 
-        # Employment years
-        score += np.select(
-            [employment_years >= 10, employment_years >= 5,
-             employment_years >= 3,  employment_years >= 1],
-            [40, 25, 10, -5],
-            default=-25
-        )
+            tier = result["risk_tier"]
 
-        # Clamp to 300–900
-        score = score.clip(300, 900).astype(int)
+            if tier == "High":
+                high += 1
+            elif tier == "Medium":
+                medium += 1
+            else:
+                low += 1
 
-        low    = int((score >= 750).sum())
-        medium = int(((score >= 650) & (score < 750)).sum())
-        high   = int((score < 650).sum())
+        scale = TOTAL_APPLICATIONS / len(sample_df)
 
         elapsed = round(time.time() - start, 2)
-        print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
+
+        print(
+            f"Portfolio Summary AFTER optimization: {elapsed} sec"
+        )
 
         return {
             "total_applications": TOTAL_APPLICATIONS,
-            "high":   high,
-            "medium": medium,
-            "low":    low,
+            "high": round(high * scale),
+            "medium": round(medium * scale),
+            "low": round(low * scale),
             "execution_time_seconds": elapsed
         }
 
     except Exception as e:
-        err = traceback.format_exc()
-        print("PORTFOLIO ERROR:", err)
-        return {"error": str(e), "detail": err}
+        print(traceback.format_exc())
+
+        return {
+            "error": str(e)
+        }
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
