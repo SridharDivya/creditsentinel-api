@@ -451,92 +451,64 @@ def get_decision_history(application_id: str):
 # Log a lending decision (APPROVE / REJECT / REVIEW)
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
-from datetime import datetime
-from fastapi import HTTPException
+# In your FastAPI main.py
 
 @app.post("/api/applications/{application_id}/decision")
 async def log_decision(application_id: str, request_body: dict):
-
-    # Check if application exists in CSV
-    matched = applications_df[
-        applications_df["application_id"].astype(str) == str(application_id)
-    ]
-
-    if len(matched) == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found"
-        )
-
+    """
+    Log analyst lending decision
+    
+    Request:
+    {
+      "decision": "APPROVE" | "REJECT" | "REVIEW",
+      "notes": "Optional analyst notes (max 500 chars)",
+      "timestamp": "2026-06-08T10:30:00Z"
+    }
+    
+    Response:
+    {
+      "audit_id": 123,
+      "status": "logged",
+      "message": "Decision recorded"
+    }
+    """
+    
     # Validate decision
-    decision = request_body.get("decision", "").upper()
-
-    if decision not in ["APPROVE", "REJECT", "REVIEW"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid decision. Allowed values: APPROVE, REJECT, REVIEW"
-        )
-
+    if request_body['decision'] not in ['APPROVE', 'REJECT', 'REVIEW']:
+        return {"error": "Invalid decision"}, 400
+    
     # Validate notes length
-    notes = request_body.get("notes", "")
-
+    notes = request_body.get('notes', '')
     if len(notes) > 500:
-        raise HTTPException(
-            status_code=400,
-            detail="Notes exceed 500 characters"
-        )
-
+        return {"error": "Notes exceed 500 characters"}, 400
+    
+    # Insert into database
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Use provided timestamp or current time
-        timestamp = request_body.get("timestamp")
-
-        if not timestamp:
-            timestamp = datetime.now()
-
         query = """
-        INSERT INTO audit_trail
+        INSERT INTO audit_trail 
         (application_id, decision, decision_notes, timestamp)
         VALUES (%s, %s, %s, %s)
         RETURNING audit_id
         """
-
-        cursor.execute(
-            query,
-            (
-                application_id,
-                decision,
-                notes,
-                timestamp
-            )
-        )
-
+        
+        cursor.execute(query, (
+            application_id,
+            request_body['decision'],
+            notes,
+            request_body.get('timestamp', datetime.now())
+        ))
+        
         audit_id = cursor.fetchone()[0]
-
-        conn.commit()
-
+        connection.commit()
+        
         return {
             "audit_id": audit_id,
             "status": "logged",
-            "message": f"Decision {decision} recorded successfully"
-        }
-
+            "message": f"Decision {request_body['decision']} recorded successfully"
+        }, 201
+    
     except Exception as e:
-        conn.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-    finally:
-        if 'cursor' in locals():
-            cursor.close()
-
-        if 'conn' in locals():
-            conn.close()
+        return {"error": str(e)}, 500
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
