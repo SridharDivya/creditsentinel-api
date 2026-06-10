@@ -508,51 +508,57 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 # =========================================================
 import time
+import traceback
 
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
 
     try:
-        high = 0
-        medium = 0
-        low = 0
-
-        sample_df = applications_df.sample(
-            n=min(500, len(applications_df)),
-            random_state=42
+        high = (
+            applications_df["risk_category"]
+            .astype(str)
+            .str.upper()
+            .eq("HIGH")
+            .sum()
         )
 
-        for _, row in sample_df.iterrows():
+        medium = (
+            applications_df["risk_category"]
+            .astype(str)
+            .str.upper()
+            .eq("MEDIUM")
+            .sum()
+        )
 
-            cibil = compute_cibil_score(row)
-
-            if cibil >= 750:
-                low += 1
-            elif cibil >= 650:
-                medium += 1
-            else:
-                high += 1
-
-        scale = TOTAL_APPLICATIONS / len(sample_df)
+        low = (
+            applications_df["risk_category"]
+            .astype(str)
+            .str.upper()
+            .eq("LOW")
+            .sum()
+        )
 
         elapsed = round(time.time() - start, 2)
 
         print(
-            f"Portfolio Summary AFTER optimization: {elapsed} sec"
+            f"Portfolio Summary execution time: {elapsed} sec"
         )
 
         return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high": round(high * scale),
-            "medium": round(medium * scale),
-            "low": round(low * scale),
+            "total_applications": len(applications_df),
+            "high": int(high),
+            "medium": int(medium),
+            "low": int(low),
             "execution_time_seconds": elapsed
         }
 
     except Exception as e:
         print(traceback.format_exc())
-        return {"error": str(e)}
+
+        return {
+            "error": str(e)
+        }
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
