@@ -576,11 +576,9 @@ def portfolio_summary():
         }
 
     except Exception as e:
-        print(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "traceback": traceback.format_exc()}
-        )
+        err = traceback.format_exc()
+        print("PORTFOLIO ERROR:", err)
+        return {"error": str(e), "detail": err}
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
