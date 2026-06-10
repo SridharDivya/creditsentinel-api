@@ -56,22 +56,7 @@ print("CSV COLUMNS:", list(applications_df.columns))
 
 # Total applications count shown in all API responses
 TOTAL_APPLICATIONS = 15000
-print("Precomputing portfolio risk tiers...")
 
-risk_tiers = []
-
-for _, row in applications_df.iterrows():
-    app_id = safe_str(row.get("application_id", ""))
-
-    try:
-        result = generate_risk_score(app_id)
-        risk_tiers.append(result["risk_tier"])
-    except:
-        risk_tiers.append("Low")
-
-applications_df["_risk_tier"] = risk_tiers
-
-print("Portfolio risk tiers precomputed.")
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
 # ⚠️  ONLY change the password below — everything else is correct
@@ -259,6 +244,42 @@ def generate_risk_score(application_id: str) -> dict:
     except Exception as e:
         print(traceback.format_exc())
         return {"risk_score": 0.0, "risk_tier": "Low"}
+        # =========================================================
+# PRECOMPUTE PORTFOLIO SUMMARY AT STARTUP
+# =========================================================
+print("Precomputing portfolio risk tiers...")
+
+PORTFOLIO_HIGH = 0
+PORTFOLIO_MEDIUM = 0
+PORTFOLIO_LOW = 0
+
+try:
+    for _, row in applications_df.iterrows():
+
+        app_id = safe_str(row.get("application_id", ""))
+
+        result = generate_risk_score(app_id)
+
+        tier = result["risk_tier"]
+
+        if tier == "High":
+            PORTFOLIO_HIGH += 1
+
+        elif tier == "Medium":
+            PORTFOLIO_MEDIUM += 1
+
+        else:
+            PORTFOLIO_LOW += 1
+
+    print(
+        f"Portfolio cached: "
+        f"High={PORTFOLIO_HIGH}, "
+        f"Medium={PORTFOLIO_MEDIUM}, "
+        f"Low={PORTFOLIO_LOW}"
+    )
+
+except Exception:
+    print(traceback.format_exc())
 
 # =========================================================
 # REQUEST MODELS
@@ -513,39 +534,26 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
-    try:
-        start = time.time()
 
-        tier_counts = applications_df["_risk_tier"].value_counts()
+    start = time.time()
 
-        high = int(tier_counts.get("High", 0))
-        medium = int(tier_counts.get("Medium", 0))
-        low = int(tier_counts.get("Low", 0))
+    elapsed = round(time.time() - start, 4)
 
-        elapsed = round(time.time() - start, 4)
+    print(
+        f"[PORTFOLIO SUMMARY] "
+        f"time={elapsed}s "
+        f"high={PORTFOLIO_HIGH} "
+        f"medium={PORTFOLIO_MEDIUM} "
+        f"low={PORTFOLIO_LOW}"
+    )
 
-        print(
-            f"[PORTFOLIO SUMMARY] "
-            f"time={elapsed}s "
-            f"high={high} "
-            f"medium={medium} "
-            f"low={low}"
-        )
-
-        return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high": high,
-            "medium": medium,
-            "low": low,
-            "execution_time_seconds": elapsed
-        }
-
-    except Exception as e:
-        print(traceback.format_exc())
-
-        return {
-            "error": str(e)
-        }
+    return {
+        "total_applications": TOTAL_APPLICATIONS,
+        "high": PORTFOLIO_HIGH,
+        "medium": PORTFOLIO_MEDIUM,
+        "low": PORTFOLIO_LOW,
+        "execution_time_seconds": elapsed
+    }
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
