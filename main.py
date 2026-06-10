@@ -8,6 +8,7 @@ import joblib
 import traceback
 import os
 import math
+import time
 
 from typing import List, Optional
 
@@ -582,7 +583,11 @@ def portfolio_summary():
 
     except Exception as e:
         print(traceback.format_exc())
-        return {"error": str(e)}
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": traceback.format_exc()}
+        )
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
