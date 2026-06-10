@@ -515,47 +515,35 @@ def portfolio_summary():
     start = time.time()
 
     try:
-        high = (
-            applications_df["risk_category"]
-            .astype(str)
-            .str.upper()
-            .eq("HIGH")
-            .sum()
-        )
+        high = 0
+        medium = 0
+        low = 0
 
-        medium = (
-            applications_df["risk_category"]
-            .astype(str)
-            .str.upper()
-            .eq("MEDIUM")
-            .sum()
-        )
+        for _, row in applications_df.iterrows():
 
-        low = (
-            applications_df["risk_category"]
-            .astype(str)
-            .str.upper()
-            .eq("LOW")
-            .sum()
-        )
+            cibil = compute_cibil_score(row)
+
+            if cibil >= 750:
+                low += 1
+            elif cibil >= 650:
+                medium += 1
+            else:
+                high += 1
 
         elapsed = round(time.time() - start, 2)
 
-        print(
-            f"Portfolio Summary execution time: {elapsed} sec"
-        )
+        print(f"Portfolio Summary execution time: {elapsed} sec")
 
         return {
             "total_applications": len(applications_df),
-            "high": int(high),
-            "medium": int(medium),
-            "low": int(low),
+            "high": high,
+            "medium": medium,
+            "low": low,
             "execution_time_seconds": elapsed
         }
 
     except Exception as e:
         print(traceback.format_exc())
-
         return {
             "error": str(e)
         }
