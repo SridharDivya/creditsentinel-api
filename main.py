@@ -472,58 +472,52 @@ def log_decision(application_id: str, req: DecisionRequest):
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
 # =========================================================
-@app.get("/api/applications/{application_id}/history")
-def get_decision_history(application_id: str):
+import time
+
+@app.get("/api/portfolio/summary")
+def portfolio_summary():
+    start = time.time()
 
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        high = 0
+        medium = 0
+        low = 0
 
-        query = """
-        SELECT audit_id,
-               decision,
-               decision_notes,
-               timestamp
-        FROM audit_trail
-        WHERE application_id = %s
-        ORDER BY timestamp DESC
-        """
+        sample_df = applications_df.sample(
+            n=min(500, len(applications_df)),
+            random_state=42
+        )
 
-        cursor.execute(query, (application_id,))
-        rows = cursor.fetchall()
+        for _, row in sample_df.iterrows():
 
-        cursor.close()
-        conn.close()
+            cibil = compute_cibil_score(row)
 
-        if not rows:
-            return {
-                "application_id": application_id,
-                "decision_history": [],
-                "latest_decision": None,
-                "latest_timestamp": None
-            }
+            if cibil >= 750:
+                low += 1
+            elif cibil >= 650:
+                medium += 1
+            else:
+                high += 1
 
-        history = []
+        scale = TOTAL_APPLICATIONS / len(sample_df)
 
-        for row in rows:
-            history.append({
-                "audit_id": row[0],
-                "decision": row[1],
-                "notes": row[2],
-                "timestamp": row[3].isoformat() if row[3] else None
-            })
+        elapsed = round(time.time() - start, 2)
+
+        print(
+            f"Portfolio Summary AFTER optimization: {elapsed} sec"
+        )
 
         return {
-            "application_id": application_id,
-            "decision_history": history,
-            "latest_decision": rows[0][1],
-            "latest_timestamp": rows[0][3].isoformat()
+            "total_applications": TOTAL_APPLICATIONS,
+            "high": round(high * scale),
+            "medium": round(medium * scale),
+            "low": round(low * scale),
+            "execution_time_seconds": elapsed
         }
 
     except Exception as e:
-        return {
-            "error": str(e)
-        }
+        print(traceback.format_exc())
+        return {"error": str(e)}
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
