@@ -8,7 +8,6 @@ import joblib
 import traceback
 import os
 import math
-import time
 
 from typing import List, Optional
 
@@ -420,29 +419,18 @@ def get_decision_history(application_id: str):
         conn.close()
 
         if not rows:
-            return {
-                "application_id": application_id,
-                "decision_history": [],
-                "latest_decision": None,
-                "latest_timestamp": None
-            }
+            return {"history": []}
 
         history = []
-
         for row in rows:
             history.append({
-                "audit_id": row[0],
-                "decision": row[1],
-                "notes": row[2],
+                "audit_id":  row[0],
+                "decision":  row[1],
+                "notes":     row[2],
                 "timestamp": row[3].isoformat() if row[3] else None
             })
 
-        return {
-            "application_id": application_id,
-            "decision_history": history,
-            "latest_decision": rows[0][1],
-            "latest_timestamp": rows[0][3].isoformat()
-        }
+        return {"history": history}
 
     except Exception as e:
         return {
@@ -518,12 +506,17 @@ def portfolio_summary():
                 return pd.to_numeric(df[name], errors="coerce").fillna(0)
             return pd.Series(0.0, index=df.index)
 
-        foir               = get_col("foir")
         monthly_income     = get_col("monthly_income")
-        loan_to_income     = get_col("loan_to_income_ratio")
+        monthly_emi        = get_col("existing_monthly_emi")
+        loan_amount        = get_col("requested_loan_amount")
         num_existing_loans = get_col("num_existing_loans")
         employment_years   = get_col("employment_years")
 
+        # Compute foir and loan_to_income from raw CSV columns (not stored directly)
+        foir           = (monthly_emi / monthly_income.replace(0, np.nan)).fillna(0) * 100
+        loan_to_income = (loan_amount / monthly_income.replace(0, np.nan)).fillna(0)
+
+        # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
         score = pd.Series(750.0, index=df.index)
 
         # FOIR
@@ -549,10 +542,11 @@ def portfolio_summary():
         )
 
         # Existing loans
+        extra_penalty = np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
         score += np.select(
             [num_existing_loans == 0, num_existing_loans == 1, num_existing_loans == 2],
             [20, 5, -15],
-            default=np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
+            default=extra_penalty
         )
 
         # Employment years
@@ -563,7 +557,7 @@ def portfolio_summary():
             default=-25
         )
 
-        # Clamp 300–900
+        # Clamp to 300–900
         score = score.clip(300, 900).astype(int)
 
         low    = int((score >= 750).sum())
@@ -571,7 +565,7 @@ def portfolio_summary():
         high   = int((score < 650).sum())
 
         elapsed = round(time.time() - start, 2)
-        print(f"Portfolio Summary execution time: {elapsed} sec")
+        print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
 
         return {
             "total_applications": TOTAL_APPLICATIONS,
@@ -587,7 +581,6 @@ def portfolio_summary():
             status_code=500,
             content={"error": str(e), "traceback": traceback.format_exc()}
         )
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
