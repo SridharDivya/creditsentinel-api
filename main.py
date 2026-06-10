@@ -456,66 +456,55 @@ def get_decision_history(application_id: str):
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 
+@app.post("/api/applications/{application_id}/decision")
+def log_decision(application_id: str, req: DecisionRequest):
 
+    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# Returns all past decisions for an application (newest first)
-# =========================================================
-@app.get("/api/applications/{application_id}/history")
-def get_decision_history(application_id: str):
+    if req.decision.upper() not in valid_decisions:
+        return {"error": "Invalid decision"}
+
+    notes = req.notes or ""
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         query = """
-        SELECT audit_id,
-               decision,
-               decision_notes,
-               timestamp
-        FROM audit_trail
-        WHERE application_id = %s
-        ORDER BY timestamp DESC
+        INSERT INTO audit_trail
+        (application_id, decision, decision_notes, timestamp)
+        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING audit_id
         """
 
-        cursor.execute(query, (application_id,))
-        rows = cursor.fetchall()
+        cursor.execute(
+            query,
+            (
+                application_id,
+                req.decision.upper(),
+                notes
+            )
+        )
+
+        audit_id = cursor.fetchone()[0]
+
+        conn.commit()
 
         cursor.close()
         conn.close()
 
-        if not rows:
-            return {
-                "application_id": application_id,
-                "decision_history": [],
-                "latest_decision": None,
-                "latest_timestamp": None
-            }
-
-        history = []
-
-        for row in rows:
-            history.append({
-                "audit_id": row[0],
-                "decision": row[1],
-                "notes": row[2],
-                "timestamp": row[3].isoformat() if row[3] else None
-            })
-
         return {
-            "application_id": application_id,
-            "decision_history": history,
-            "latest_decision": rows[0][1],
-            "latest_timestamp": rows[0][3].isoformat()
+            "audit_id": audit_id,
+            "status": "logged",
+            "message": "Decision recorded successfully"
         }
 
     except Exception as e:
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
+
+
 # =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
+# AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
 # Returns all past decisions for an application (newest first)
 # =========================================================
 import time
