@@ -508,14 +508,12 @@ def portfolio_summary():
             return pd.Series(0.0, index=df.index)
 
         monthly_income     = get_col("monthly_income")
-        monthly_emi        = get_col("existing_monthly_emi")
-        loan_amount        = get_col("requested_loan_amount")
         num_existing_loans = get_col("num_existing_loans")
         employment_years   = get_col("employment_years")
 
-        # Compute foir and loan_to_income from raw CSV columns (not stored directly)
-        foir           = (monthly_emi / monthly_income.replace(0, np.nan)).fillna(0) * 100
-        loan_to_income = (loan_amount / monthly_income.replace(0, np.nan)).fillna(0)
+        # Use foir and loan_to_income_ratio directly from CSV (they exist as columns)
+        foir           = get_col("foir")
+        loan_to_income = get_col("loan_to_income_ratio")
 
         # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
         score = pd.Series(750.0, index=df.index)
