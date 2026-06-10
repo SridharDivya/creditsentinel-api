@@ -56,7 +56,22 @@ print("CSV COLUMNS:", list(applications_df.columns))
 
 # Total applications count shown in all API responses
 TOTAL_APPLICATIONS = 15000
+print("Precomputing portfolio risk tiers...")
 
+risk_tiers = []
+
+for _, row in applications_df.iterrows():
+    app_id = safe_str(row.get("application_id", ""))
+
+    try:
+        result = generate_risk_score(app_id)
+        risk_tiers.append(result["risk_tier"])
+    except:
+        risk_tiers.append("Low")
+
+applications_df["_risk_tier"] = risk_tiers
+
+print("Portfolio risk tiers precomputed.")
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
 # ⚠️  ONLY change the password below — everything else is correct
@@ -498,47 +513,30 @@ def log_decision(application_id: str, req: DecisionRequest):
 # Returns all past decisions for an application (newest first)
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
-    start = time.time()
-
     try:
-        high = 0
-        medium = 0
-        low = 0
+        start = time.time()
 
-        # Use a sample to avoid 60+ second execution
-        sample_df = applications_df.sample(
-            n=min(500, len(applications_df)),
-            random_state=42
-        )
+        tier_counts = applications_df["_risk_tier"].value_counts()
 
-        for _, row in sample_df.iterrows():
+        high = int(tier_counts.get("High", 0))
+        medium = int(tier_counts.get("Medium", 0))
+        low = int(tier_counts.get("Low", 0))
 
-            app_id = safe_str(row.get("application_id", ""))
-
-            result = generate_risk_score(app_id)
-
-            tier = result["risk_tier"]
-
-            if tier == "High":
-                high += 1
-            elif tier == "Medium":
-                medium += 1
-            else:
-                low += 1
-
-        scale = TOTAL_APPLICATIONS / len(sample_df)
-
-        elapsed = round(time.time() - start, 2)
+        elapsed = round(time.time() - start, 4)
 
         print(
-            f"Portfolio Summary AFTER optimization: {elapsed} sec"
+            f"[PORTFOLIO SUMMARY] "
+            f"time={elapsed}s "
+            f"high={high} "
+            f"medium={medium} "
+            f"low={low}"
         )
 
         return {
             "total_applications": TOTAL_APPLICATIONS,
-            "high": round(high * scale),
-            "medium": round(medium * scale),
-            "low": round(low * scale),
+            "high": high,
+            "medium": medium,
+            "low": low,
             "execution_time_seconds": elapsed
         }
 
