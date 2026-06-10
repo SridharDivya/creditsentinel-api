@@ -454,22 +454,17 @@ def get_decision_history(application_id: str):
 from datetime import datetime
 
 @app.post("/api/applications/{application_id}/decision")
-def log_decision(application_id: str, req: DecisionRequest):
+async def log_decision(application_id: str, request_body: dict):
 
-    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
-
-    if req.decision.upper() not in valid_decisions:
+    # Validate decision
+    if request_body["decision"] not in ["APPROVE", "REJECT", "REVIEW"]:
         return {"error": "Invalid decision"}
 
-    notes = req.notes or ""
+    # Validate notes length
+    notes = request_body.get("notes", "")
 
     if len(notes) > 500:
         return {"error": "Notes exceed 500 characters"}
-
-    timestamp = req.timestamp
-
-    if not timestamp:
-        timestamp = datetime.now()
 
     try:
         conn = get_db_connection()
@@ -486,9 +481,9 @@ def log_decision(application_id: str, req: DecisionRequest):
             query,
             (
                 application_id,
-                req.decision.upper(),
+                request_body["decision"],
                 notes,
-                timestamp
+                request_body.get("timestamp", datetime.now())
             )
         )
 
@@ -502,7 +497,7 @@ def log_decision(application_id: str, req: DecisionRequest):
         return {
             "audit_id": audit_id,
             "status": "logged",
-            "message": f"Decision {req.decision.upper()} recorded successfully"
+            "message": f"Decision {request_body['decision']} recorded successfully"
         }
 
     except Exception as e:
