@@ -506,18 +506,39 @@ def log_decision(application_id: str, req: DecisionRequest):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
 # Returns all past decisions for an application (newest first)
-# =========================================================
 import time
 import traceback
 
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
+    start = time.time()
+
     try:
-        print("Available Columns:")
-        print(applications_df.columns.tolist())
+        high = 0
+        medium = 0
+        low = 0
+
+        for _, row in applications_df.iterrows():
+
+            cibil = compute_cibil_score(row)
+
+            if cibil >= 750:
+                low += 1
+            elif cibil >= 650:
+                medium += 1
+            else:
+                high += 1
+
+        elapsed = round(time.time() - start, 2)
+
+        print(f"Portfolio Summary execution time: {elapsed} sec")
 
         return {
-            "columns": applications_df.columns.tolist()
+            "total_applications": len(applications_df),
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "execution_time_seconds": elapsed
         }
 
     except Exception as e:
@@ -525,7 +546,6 @@ def portfolio_summary():
         return {
             "error": str(e)
         }
-
          
 if __name__ == "__main__":
     import uvicorn
