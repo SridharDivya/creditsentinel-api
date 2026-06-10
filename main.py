@@ -451,6 +451,8 @@ def get_decision_history(application_id: str):
 # Log a lending decision (APPROVE / REJECT / REVIEW)
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
+from datetime import datetime
+
 @app.post("/api/applications/{application_id}/decision")
 def log_decision(application_id: str, req: DecisionRequest):
 
@@ -461,6 +463,14 @@ def log_decision(application_id: str, req: DecisionRequest):
 
     notes = req.notes or ""
 
+    if len(notes) > 500:
+        return {"error": "Notes exceed 500 characters"}
+
+    timestamp = req.timestamp
+
+    if not timestamp:
+        timestamp = datetime.now()
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -468,7 +478,7 @@ def log_decision(application_id: str, req: DecisionRequest):
         query = """
         INSERT INTO audit_trail
         (application_id, decision, decision_notes, timestamp)
-        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, %s)
         RETURNING audit_id
         """
 
@@ -477,7 +487,8 @@ def log_decision(application_id: str, req: DecisionRequest):
             (
                 application_id,
                 req.decision.upper(),
-                notes
+                notes,
+                timestamp
             )
         )
 
@@ -491,13 +502,11 @@ def log_decision(application_id: str, req: DecisionRequest):
         return {
             "audit_id": audit_id,
             "status": "logged",
-            "message": "Decision recorded successfully"
+            "message": f"Decision {req.decision.upper()} recorded successfully"
         }
 
     except Exception as e:
         return {"error": str(e)}
-
-
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # Returns all past decisions for an application (newest first)
