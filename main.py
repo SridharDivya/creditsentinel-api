@@ -22,7 +22,7 @@ from feature_engine import compute_features
 import psycopg2
 from fastapi.responses import JSONResponse
 
-)
+
 
 
 # =========================================================
