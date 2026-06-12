@@ -22,13 +22,7 @@ from feature_engine import compute_features
 import psycopg2
 from fastapi.responses import JSONResponse
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-def get_db_connection():
-    """Establishes a connection to your Render PostgreSQL database."""
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL environment variable is missing on Render!")
-    return psycopg2.connect(DATABASE_URL)
+)
 
 
 # =========================================================
