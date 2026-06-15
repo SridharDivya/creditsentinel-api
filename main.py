@@ -480,8 +480,8 @@ def get_decision_history(application_id: str):
 # Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
 # =========================================================
 
-@app.post("/api/applications/{application_id}/decision")
-def log_decision(application_id: str, req: DecisionRequest):
+@app.post("/api/applications/{application_id}/process-decision")
+def process_decision(application_id: str, req: DecisionRequest):
 
     valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
@@ -494,21 +494,55 @@ def log_decision(application_id: str, req: DecisionRequest):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        query = """
-        INSERT INTO audit_trail
-        (application_id, decision, decision_notes, timestamp)
-        VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-        RETURNING audit_id
-        """
+        # APPROVE
+        if req.decision.upper() == "APPROVE":
 
-        cursor.execute(
-            query,
-            (
-                application_id,
-                req.decision.upper(),
-                notes
-            )
-        )
+            cursor.execute("""
+                UPDATE applications
+                SET application_status = 'approved',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE application_id = %s
+            """, (application_id,))
+
+            print(f"EMAIL: Loan approved for {application_id}")
+
+        # REJECT
+        elif req.decision.upper() == "REJECT":
+
+            cursor.execute("""
+                UPDATE applications
+                SET application_status = 'rejected',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE application_id = %s
+            """, (application_id,))
+
+            print(f"EMAIL: Loan rejected for {application_id}")
+
+        # REVIEW
+        elif req.decision.upper() == "REVIEW":
+
+            cursor.execute("""
+                UPDATE applications
+                SET application_status = 'under_review',
+                    assigned_reviewer = 'TEAM_LEAD',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE application_id = %s
+            """, (application_id,))
+
+            print(f"NOTIFY TEAM LEAD: {application_id}")
+
+
+        # Audit Log
+        cursor.execute("""
+            INSERT INTO audit_trail
+            (application_id, decision, decision_notes, timestamp)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (
+            application_id,
+            req.decision.upper(),
+            notes
+        ))
 
         audit_id = cursor.fetchone()[0]
 
@@ -519,12 +553,21 @@ def log_decision(application_id: str, req: DecisionRequest):
 
         return {
             "audit_id": audit_id,
-            "status": "logged",
-            "message": "Decision recorded successfully"
+            "status": req.decision.lower(),
+            "message": "Decision processed successfully"
         }
 
     except Exception as e:
-        return {"error": str(e)}
+
+        conn.rollback()
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "failed",
+                "error": str(e)
+            }
+        )
 
 
 # =========================================================
