@@ -57,14 +57,13 @@ TOTAL_APPLICATIONS = 15000
 
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
-# ⚠️  ONLY change the password below — everything else is correct
 # =========================================================
 DB_CONFIG = {
     "host":     "dpg-d8j9bhernols73cff9t0-a",
     "port":     5432,
     "database": "creditsentinel_db_r67r",
     "user":     "creditsentinel_db_r67r_user",
-    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"   # ← paste your Render DB password here
+    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"
 }
 
 def get_db_connection():
@@ -79,10 +78,6 @@ try:
     print("✅ PostgreSQL Connected")
 except Exception as e:
     print(f"❌ PostgreSQL Connection Failed: {e}")
-
-# =========================================================
-# MAILTRAP SMTP CONFIGURATION
-# =========================================================
 
 # =========================================================
 # MODEL FEATURES
@@ -140,21 +135,6 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
 
 # =========================================================
 # CIBIL SCORE — derived from real CSV data
-#
-# Your CSV has no bureau/CIBIL column. So we calculate it
-# using the actual fields that exist: foir, monthly_income,
-# loan_to_income_ratio, num_existing_loans, employment_years.
-#
-# Formula logic (standard credit scoring approach):
-#   Base score      = 750  (average CIBIL starting point)
-#   FOIR penalty    = high debt-to-income ratio lowers score
-#   Income boost    = higher income slightly improves score
-#   LTI penalty     = high loan-to-income ratio lowers score
-#   Existing loans  = more loans = higher risk = lower score
-#   Employment      = longer employment = lower risk = higher score
-#
-# Final score is clamped to 300-900 (standard CIBIL range).
-# Every application gets a DIFFERENT score based on its real data.
 # =========================================================
 def compute_cibil_score(row) -> int:
     row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
@@ -165,9 +145,9 @@ def compute_cibil_score(row) -> int:
     num_existing_loans = safe_float(row_dict.get("num_existing_loans", 0))
     employment_years   = safe_float(row_dict.get("employment_years", 0))
 
-    score = 750.0  # base score
+    score = 750.0
 
-    # FOIR: 0-30% is healthy, above 50% is risky
+    # FOIR
     if foir <= 30:
         score += 40
     elif foir <= 40:
@@ -179,7 +159,7 @@ def compute_cibil_score(row) -> int:
     else:
         score -= 100
 
-    # Monthly income: higher income = better creditworthiness
+    # Monthly income
     if monthly_income >= 100000:
         score += 50
     elif monthly_income >= 75000:
@@ -191,7 +171,7 @@ def compute_cibil_score(row) -> int:
     else:
         score -= 20
 
-    # Loan-to-income ratio: lower is better
+    # Loan-to-income ratio
     if loan_to_income <= 2:
         score += 30
     elif loan_to_income <= 4:
@@ -201,7 +181,7 @@ def compute_cibil_score(row) -> int:
     else:
         score -= 50
 
-    # Number of existing loans: more = riskier
+    # Number of existing loans
     if num_existing_loans == 0:
         score += 20
     elif num_existing_loans == 1:
@@ -211,7 +191,7 @@ def compute_cibil_score(row) -> int:
     else:
         score -= 30 * (num_existing_loans - 2)
 
-    # Employment years: stable employment = better score
+    # Employment years
     if employment_years >= 10:
         score += 40
     elif employment_years >= 5:
@@ -223,7 +203,6 @@ def compute_cibil_score(row) -> int:
     else:
         score -= 25
 
-    # Clamp to standard CIBIL range 300-900
     return max(300, min(900, int(score)))
 
 
@@ -256,10 +235,12 @@ class ScoreRequest(BaseModel):
 class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
+# FIX 1: Added analyst_name field to DecisionRequest
 class DecisionRequest(BaseModel):
-    decision:  str
-    notes:     Optional[str] = ""
-    timestamp: Optional[str] = None
+    decision:     str
+    notes:        Optional[str] = ""
+    analyst_name: Optional[str] = "Unknown"   # ← ADDED: was missing, caused analyst_name = null
+    timestamp:    Optional[str] = None
 
 # =========================================================
 # HEALTH
@@ -276,9 +257,6 @@ def health():
 # =========================================================
 # SCORE SINGLE
 # =========================================================
-# =========================================================
-# SCORE SINGLE
-# =========================================================
 @app.post("/api/score")
 def score_application(req: ScoreRequest):
     start_time = time.time()
@@ -287,14 +265,13 @@ def score_application(req: ScoreRequest):
         result = generate_risk_score(req.application_id)
         latency_ms = (time.time() - start_time) * 1000
 
-        # Log the prediction
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp":      datetime.now().isoformat(),
             "application_id": req.application_id,
-            "risk_score": result["risk_score"],
-            "risk_tier": result["risk_tier"],
-            "latency_ms": round(latency_ms, 2),
-            "status": "success"
+            "risk_score":     result["risk_score"],
+            "risk_tier":      result["risk_tier"],
+            "latency_ms":     round(latency_ms, 2),
+            "status":         "success"
         }
 
         with open("model_predictions.log", "a") as f:
@@ -302,22 +279,22 @@ def score_application(req: ScoreRequest):
 
         return {
             "application_id": req.application_id,
-            "model_loaded": True,
-            "risk_score": result["risk_score"],
-            "risk_tier": result["risk_tier"],
-            "features_used": len(MODEL_FEATURES),
-            "latency_ms": round(latency_ms, 2)
+            "model_loaded":   True,
+            "risk_score":     result["risk_score"],
+            "risk_tier":      result["risk_tier"],
+            "features_used":  len(MODEL_FEATURES),
+            "latency_ms":     round(latency_ms, 2)
         }
 
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
 
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp":      datetime.now().isoformat(),
             "application_id": req.application_id,
-            "latency_ms": round(latency_ms, 2),
-            "status": "error",
-            "error": str(e)
+            "latency_ms":     round(latency_ms, 2),
+            "status":         "error",
+            "error":          str(e)
         }
 
         with open("model_predictions.log", "a") as f:
@@ -325,9 +302,10 @@ def score_application(req: ScoreRequest):
 
         return {
             "application_id": req.application_id,
-            "model_loaded": False,
-            "error": str(e)
+            "model_loaded":   False,
+            "error":          str(e)
         }
+
 # =========================================================
 # SCORE BATCH
 # =========================================================
@@ -368,8 +346,8 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
                 "risk_score":         risk_score,
                 "risk_tier":          risk_tier,
-                "cibil_score":        compute_cibil_score(row),        # computed from real CSV data
-                "credit_score":       get_ml_credit_score(risk_score), # ML-derived 300-900
+                "cibil_score":        compute_cibil_score(row),
+                "credit_score":       get_ml_credit_score(risk_score),
                 "application_status": get_status(risk_tier)
             })
 
@@ -399,8 +377,8 @@ def get_application_detail(application_id: str):
         score_data   = generate_risk_score(application_id)
         risk_score   = score_data["risk_score"]
         risk_tier    = score_data["risk_tier"]
-        cibil_score  = compute_cibil_score(row)        # computed from real CSV data
-        credit_score = get_ml_credit_score(risk_score) # ML-derived 300-900
+        cibil_score  = compute_cibil_score(row)
+        credit_score = get_ml_credit_score(risk_score)
 
         application_status = safe_str(row.get("application_status", row.get("status", "")))
         if application_status == "":
@@ -430,20 +408,15 @@ def get_application_detail(application_id: str):
 
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
-# Returns all past decisions for an application (newest first)
-# =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# Returns all past decisions for an application (newest first)
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
-
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-       query = """
+        # FIX 2: Corrected indentation (was 7 spaces, must be 8)
+        query = """
 SELECT audit_id,
        decision,
        decision_notes,
@@ -465,70 +438,45 @@ ORDER BY timestamp DESC
 
         history = []
         for row in rows:
-           history.append({
-    "audit_id": row[0],
-    "decision": row[1],
-    "notes": row[2],
-    "timestamp": row[3].isoformat() if row[3] else None,
-    "analyst_name": row[4]
-})
+            # FIX 3: Corrected indentation on history.append block
+            history.append({
+                "audit_id":     row[0],
+                "decision":     row[1],
+                "notes":        row[2],
+                "timestamp":    row[3].isoformat() if row[3] else None,
+                "analyst_name": row[4]
+            })
 
         return {"history": history}
 
     except Exception as e:
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
 
 # =========================================================
 # NOTIFICATION HELPERS
 # =========================================================
-def send_email(application_id: str,
-               subject: str,
-               body: str):
-
+def send_email(application_id: str, subject: str, body: str):
     try:
         recipient = f"{application_id.lower()}@example.com"
 
         message = MIMEMultipart()
-        message["From"] = FROM_EMAIL
-        message["To"] = recipient
+        message["From"]    = FROM_EMAIL
+        message["To"]      = recipient
         message["Subject"] = subject
 
         message.attach(MIMEText(body, "plain"))
 
-        server = smtplib.SMTP(
-            MAILTRAP_HOST,
-            MAILTRAP_PORT
-        )
-
+        server = smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT)
         server.starttls()
-
-        server.login(
-            MAILTRAP_USERNAME,
-            MAILTRAP_PASSWORD
-        )
-
-        server.sendmail(
-            FROM_EMAIL,
-            recipient,
-            message.as_string()
-        )
-
+        server.login(MAILTRAP_USERNAME, MAILTRAP_PASSWORD)
+        server.sendmail(FROM_EMAIL, recipient, message.as_string())
         server.quit()
 
-        print(
-            f"Mailtrap email sent to {recipient}"
-        )
-
+        print(f"Mailtrap email sent to {recipient}")
         return True
 
     except Exception as e:
-
-        print(
-            f"Mailtrap email failed: {str(e)}"
-        )
-
+        print(f"Mailtrap email failed: {str(e)}")
         return False
 
 
@@ -536,32 +484,24 @@ def notify_team_lead(application_id: str):
     print("\n===== INTERNAL NOTIFICATION =====")
     print(f"{application_id} assigned to TEAM_LEAD")
     print("=================================\n")
-
     return True
 
 # =========================================================
-# AUDIT TRAIL — POST /api/applications/{id}/decision
-# Log a lending decision (APPROVE / REJECT / REVIEW)
-# Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
+# AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
-
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
     valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
     if req.decision.upper() not in valid_decisions:
-        return {
-            "status": "failed",
-            "error": "Invalid decision"
-        }
+        return {"status": "failed", "error": "Invalid decision"}
 
     notes = req.notes or ""
-
-    conn = None
+    conn  = None
 
     try:
-        conn = get_db_connection()
+        conn   = get_db_connection()
         cursor = conn.cursor()
 
         notification_sent = False
@@ -584,7 +524,6 @@ def process_decision(application_id: str, req: DecisionRequest):
                 "Loan Approved",
                 "Congratulations! Your loan application has been approved."
             )
-
             notification_type = "approval_email"
 
         # ==========================================
@@ -604,7 +543,6 @@ def process_decision(application_id: str, req: DecisionRequest):
                 "Loan Rejected",
                 f"Your loan application was rejected.\nReason: {notes}"
             )
-
             notification_type = "rejection_email"
 
         # ==========================================
@@ -621,69 +559,58 @@ def process_decision(application_id: str, req: DecisionRequest):
             """, (application_id,))
 
             notification_sent = notify_team_lead(application_id)
-
             notification_type = "internal_review_notification"
 
         # ==========================================
         # AUDIT TRAIL
+        # FIX 4: Corrected indentation (was 7 spaces, must be 8)
         # ==========================================
-       cursor.execute("""
-    INSERT INTO audit_trail
-    (
-        application_id,
-        decision,
-        decision_notes,
-        analyst_name,
-        timestamp
-    )
-    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-    RETURNING audit_id
-""", (
-    application_id,
-    req.decision.upper(),
-    notes,
-    req.analyst_name
-))
+        cursor.execute("""
+            INSERT INTO audit_trail
+            (application_id, decision, decision_notes, analyst_name, timestamp)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (
+            application_id,
+            req.decision.upper(),
+            notes,
+            req.analyst_name   # FIX 5: Now works because analyst_name is in DecisionRequest
+        ))
 
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
-
         cursor.close()
         conn.close()
 
         return {
-            "application_id": application_id,
-            "audit_id": audit_id,
-            "status": req.decision.lower(),
-            "next_action": notification_type,
+            "application_id":    application_id,
+            "audit_id":          audit_id,
+            "status":            req.decision.lower(),
+            "next_action":       notification_type,
             "notification_sent": notification_sent,
-            "message": "Decision processed successfully"
+            "message":           "Decision processed successfully"
         }
 
     except Exception as e:
-
         if conn:
             conn.rollback()
             conn.close()
 
-        print(
-            f"Decision failed for "
-            f"{application_id}: {str(e)}"
-        )
+        print(f"Decision failed for {application_id}: {str(e)}")
 
         return JSONResponse(
             status_code=500,
             content={
-                "status": "failed",
+                "status":         "failed",
                 "application_id": application_id,
-                "error": str(e)
+                "error":          str(e)
             }
         )
 
 # =========================================================
-# AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
-# Returns all past decisions for an application (newest first)
+# PORTFOLIO SUMMARY
+# =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
@@ -698,12 +625,9 @@ def portfolio_summary():
         monthly_income     = get_col("monthly_income")
         num_existing_loans = get_col("num_existing_loans")
         employment_years   = get_col("employment_years")
+        foir               = get_col("foir")
+        loan_to_income     = get_col("loan_to_income_ratio")
 
-        # Use foir and loan_to_income_ratio directly from CSV (they exist as columns)
-        foir           = get_col("foir")
-        loan_to_income = get_col("loan_to_income_ratio")
-
-        # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
         score = pd.Series(750.0, index=df.index)
 
         # FOIR
@@ -744,7 +668,6 @@ def portfolio_summary():
             default=-25
         )
 
-        # Clamp to 300–900
         score = score.clip(300, 900).astype(int)
 
         low    = int((score >= 750).sum())
@@ -755,10 +678,10 @@ def portfolio_summary():
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
 
         return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high":   high,
-            "medium": medium,
-            "low":    low,
+            "total_applications":     TOTAL_APPLICATIONS,
+            "high":                   high,
+            "medium":                 medium,
+            "low":                    low,
             "execution_time_seconds": elapsed
         }
 
@@ -766,7 +689,10 @@ def portfolio_summary():
         err = traceback.format_exc()
         print("PORTFOLIO ERROR:", err)
         return {"error": str(e), "detail": err}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+   
