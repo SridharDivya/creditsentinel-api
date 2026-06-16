@@ -84,12 +84,6 @@ except Exception as e:
 # MAILTRAP SMTP CONFIGURATION
 # =========================================================
 
-MAILTRAP_HOST = "sandbox.smtp.mailtrap.io"
-MAILTRAP_PORT = 2525
-MAILTRAP_USERNAME = "889c5187d0a4ed"
-MAILTRAP_PASSWORD = "75eb40f29c7c50"
-
-FROM_EMAIL = "creditsentinel@test.com"
 # =========================================================
 # MODEL FEATURES
 # =========================================================
