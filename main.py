@@ -15,7 +15,9 @@ from datetime import datetime
 from typing import List, Optional
 
 from feature_engine import compute_features
-
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 # =========================================================
 # DATABASE CONNECTION (RENDER POSTGRESQL)
 # =========================================================
@@ -78,6 +80,16 @@ try:
 except Exception as e:
     print(f"❌ PostgreSQL Connection Failed: {e}")
 
+# =========================================================
+# MAILTRAP SMTP CONFIGURATION
+# =========================================================
+
+MAILTRAP_HOST = "sandbox.smtp.mailtrap.io"
+MAILTRAP_PORT = 2525
+MAILTRAP_USERNAME = "889c5187d0a4ed"
+MAILTRAP_PASSWORD = "75eb40f29c7c50"
+
+FROM_EMAIL = "creditsentinel@test.com"
 # =========================================================
 # MODEL FEATURES
 # =========================================================
@@ -475,14 +487,53 @@ def get_decision_history(application_id: str):
 # =========================================================
 # NOTIFICATION HELPERS
 # =========================================================
-def send_email(application_id: str, subject: str, body: str):
-    print("\n========== EMAIL ==========")
-    print(f"Application ID : {application_id}")
-    print(f"Subject        : {subject}")
-    print(f"Message        : {body}")
-    print("===========================\n")
+def send_email(application_id: str,
+               subject: str,
+               body: str):
 
-    return True
+    try:
+        recipient = f"{application_id.lower()}@example.com"
+
+        message = MIMEMultipart()
+        message["From"] = FROM_EMAIL
+        message["To"] = recipient
+        message["Subject"] = subject
+
+        message.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP(
+            MAILTRAP_HOST,
+            MAILTRAP_PORT
+        )
+
+        server.starttls()
+
+        server.login(
+            MAILTRAP_USERNAME,
+            MAILTRAP_PASSWORD
+        )
+
+        server.sendmail(
+            FROM_EMAIL,
+            recipient,
+            message.as_string()
+        )
+
+        server.quit()
+
+        print(
+            f"Mailtrap email sent to {recipient}"
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"Mailtrap email failed: {str(e)}"
+        )
+
+        return False
 
 
 def notify_team_lead(application_id: str):
