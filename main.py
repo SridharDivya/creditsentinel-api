@@ -472,7 +472,25 @@ def get_decision_history(application_id: str):
             "error": str(e)
         }
 
+# =========================================================
+# NOTIFICATION HELPERS
+# =========================================================
+def send_email(application_id: str, subject: str, body: str):
+    print("\n========== EMAIL ==========")
+    print(f"Application ID : {application_id}")
+    print(f"Subject        : {subject}")
+    print(f"Message        : {body}")
+    print("===========================\n")
 
+    return True
+
+
+def notify_team_lead(application_id: str):
+    print("\n===== INTERNAL NOTIFICATION =====")
+    print(f"{application_id} assigned to TEAM_LEAD")
+    print("=================================\n")
+
+    return True
 
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/decision
@@ -486,15 +504,25 @@ def process_decision(application_id: str, req: DecisionRequest):
     valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
     if req.decision.upper() not in valid_decisions:
-        return {"error": "Invalid decision"}
+        return {
+            "status": "failed",
+            "error": "Invalid decision"
+        }
 
     notes = req.notes or ""
+
+    conn = None
 
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        notification_sent = False
+        notification_type = None
+
+        # ==========================================
         # APPROVE
+        # ==========================================
         if req.decision.upper() == "APPROVE":
 
             cursor.execute("""
@@ -504,9 +532,17 @@ def process_decision(application_id: str, req: DecisionRequest):
                 WHERE application_id = %s
             """, (application_id,))
 
-            print(f"EMAIL: Loan approved for {application_id}")
+            notification_sent = send_email(
+                application_id,
+                "Loan Approved",
+                "Congratulations! Your loan application has been approved."
+            )
 
+            notification_type = "approval_email"
+
+        # ==========================================
         # REJECT
+        # ==========================================
         elif req.decision.upper() == "REJECT":
 
             cursor.execute("""
@@ -516,9 +552,17 @@ def process_decision(application_id: str, req: DecisionRequest):
                 WHERE application_id = %s
             """, (application_id,))
 
-            print(f"EMAIL: Loan rejected for {application_id}")
+            notification_sent = send_email(
+                application_id,
+                "Loan Rejected",
+                f"Your loan application was rejected.\nReason: {notes}"
+            )
 
+            notification_type = "rejection_email"
+
+        # ==========================================
         # REVIEW
+        # ==========================================
         elif req.decision.upper() == "REVIEW":
 
             cursor.execute("""
@@ -529,13 +573,21 @@ def process_decision(application_id: str, req: DecisionRequest):
                 WHERE application_id = %s
             """, (application_id,))
 
-            print(f"NOTIFY TEAM LEAD: {application_id}")
+            notification_sent = notify_team_lead(application_id)
 
+            notification_type = "internal_review_notification"
 
-        # Audit Log
+        # ==========================================
+        # AUDIT TRAIL
+        # ==========================================
         cursor.execute("""
             INSERT INTO audit_trail
-            (application_id, decision, decision_notes, timestamp)
+            (
+                application_id,
+                decision,
+                decision_notes,
+                timestamp
+            )
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
         """, (
@@ -552,23 +604,33 @@ def process_decision(application_id: str, req: DecisionRequest):
         conn.close()
 
         return {
+            "application_id": application_id,
             "audit_id": audit_id,
             "status": req.decision.lower(),
+            "next_action": notification_type,
+            "notification_sent": notification_sent,
             "message": "Decision processed successfully"
         }
 
     except Exception as e:
 
-        conn.rollback()
+        if conn:
+            conn.rollback()
+            conn.close()
+
+        print(
+            f"Decision failed for "
+            f"{application_id}: {str(e)}"
+        )
 
         return JSONResponse(
             status_code=500,
             content={
                 "status": "failed",
+                "application_id": application_id,
                 "error": str(e)
             }
         )
-
 
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
