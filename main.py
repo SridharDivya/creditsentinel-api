@@ -627,21 +627,23 @@ def process_decision(application_id: str, req: DecisionRequest):
         # ==========================================
         # AUDIT TRAIL
         # ==========================================
-        cursor.execute("""
-            INSERT INTO audit_trail
-            (
-                application_id,
-                decision,
-                decision_notes,
-                timestamp
-            )
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING audit_id
-        """, (
-            application_id,
-            req.decision.upper(),
-            notes
-        ))
+       cursor.execute("""
+    INSERT INTO audit_trail
+    (
+        application_id,
+        decision,
+        decision_notes,
+        analyst_name,
+        timestamp
+    )
+    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+    RETURNING audit_id
+""", (
+    application_id,
+    req.decision.upper(),
+    notes,
+    req.analyst_name
+))
 
         audit_id = cursor.fetchone()[0]
 
