@@ -443,15 +443,16 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        query = """
-        SELECT audit_id,
-               decision,
-               decision_notes,
-               timestamp
-        FROM audit_trail
-        WHERE application_id = %s
-        ORDER BY timestamp DESC
-        """
+       query = """
+SELECT audit_id,
+       decision,
+       decision_notes,
+       timestamp,
+       analyst_name
+FROM audit_trail
+WHERE application_id = %s
+ORDER BY timestamp DESC
+"""
 
         cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
@@ -464,12 +465,13 @@ def get_decision_history(application_id: str):
 
         history = []
         for row in rows:
-            history.append({
-                "audit_id":  row[0],
-                "decision":  row[1],
-                "notes":     row[2],
-                "timestamp": row[3].isoformat() if row[3] else None
-            })
+           history.append({
+    "audit_id": row[0],
+    "decision": row[1],
+    "notes": row[2],
+    "timestamp": row[3].isoformat() if row[3] else None,
+    "analyst_name": row[4]
+})
 
         return {"history": history}
 
