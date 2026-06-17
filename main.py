@@ -229,19 +229,21 @@ def generate_risk_score(application_id: str) -> dict:
 # =========================================================
 # REQUEST MODELS
 # =========================================================
+
+# =========================================================
+# REQUEST MODELS
+# =========================================================
 class ScoreRequest(BaseModel):
     application_id: str
 
 class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
-# FIX 1: Added analyst_name field to DecisionRequest
+# UPDATED: Removed analyst_name field completely from the request payload
 class DecisionRequest(BaseModel):
-    decision:     str
-    notes:        Optional[str] = ""
-    analyst_name: Optional[str] = "Unknown"   # ← ADDED: was missing, caused analyst_name = null
-    timestamp:    Optional[str] = None
-
+    decision:  str
+    notes:     Optional[str] = ""
+    timestamp: Optional[str] = None
 # =========================================================
 # HEALTH
 # =========================================================
@@ -409,23 +411,35 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
+        # Cross-reference with the CSV to grab the true applicant name fallback
+        matched = applications_df[
+            applications_df["application_id"].astype(str) == str(application_id)
+        ]
+        csv_applicant_name = (
+            safe_str(matched.iloc[0]["applicant_name"])
+            if len(matched) > 0
+            else "Unknown Applicant"
+        )
+
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # FIX 2: Corrected indentation (was 7 spaces, must be 8)
         query = """
-SELECT audit_id,
-       decision,
-       decision_notes,
-       timestamp,
-       analyst_name
-FROM audit_trail
-WHERE application_id = %s
-ORDER BY timestamp DESC
-"""
+            SELECT audit_id,
+                   decision,
+                   decision_notes,
+                   timestamp,
+                   analyst_name
+            FROM audit_trail
+            WHERE application_id = %s
+            ORDER BY timestamp DESC
+        """
 
         cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
@@ -438,54 +452,23 @@ ORDER BY timestamp DESC
 
         history = []
         for row in rows:
-            # FIX 3: Corrected indentation on history.append block
+            db_analyst_name = row[4]
+            
+            # ✅ FALLBACK: If DB has null/empty for historic runs, use the CSV real name
+            final_name = db_analyst_name if (db_analyst_name and db_analyst_name.strip()) else csv_applicant_name
+
             history.append({
-                "audit_id":     row[0],
-                "decision":     row[1],
-                "notes":        row[2],
-                "timestamp":    row[3].isoformat() if row[3] else None,
-                "applicant_name": row[4]
+                "audit_id":       row[0],
+                "decision":       row[1],
+                "notes":          row[2],
+                "timestamp":      row[3].isoformat() if row[3] else None,
+                "applicant_name": final_name
             })
 
         return {"history": history}
 
     except Exception as e:
         return {"error": str(e)}
-
-# =========================================================
-# NOTIFICATION HELPERS
-# =========================================================
-def send_email(application_id: str, subject: str, body: str):
-    try:
-        recipient = f"{application_id.lower()}@example.com"
-
-        message = MIMEMultipart()
-        message["From"]    = FROM_EMAIL
-        message["To"]      = recipient
-        message["Subject"] = subject
-
-        message.attach(MIMEText(body, "plain"))
-
-        server = smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT)
-        server.starttls()
-        server.login(MAILTRAP_USERNAME, MAILTRAP_PASSWORD)
-        server.sendmail(FROM_EMAIL, recipient, message.as_string())
-        server.quit()
-
-        print(f"Mailtrap email sent to {recipient}")
-        return True
-
-    except Exception as e:
-        print(f"Mailtrap email failed: {str(e)}")
-        return False
-
-
-def notify_team_lead(application_id: str):
-    print("\n===== INTERNAL NOTIFICATION =====")
-    print(f"{application_id} assigned to TEAM_LEAD")
-    print("=================================\n")
-    return True
-
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
@@ -503,16 +486,19 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn  = None
 
-    # ✅ FIXED INDENTATION: Safely nested inside the function
+    #  LOOKUP REAL APPLICANT NAME FROM CSV
     matched = applications_df[
         applications_df["application_id"].astype(str) == str(application_id)
     ]
 
-    applicant_name = (
-        safe_str(matched.iloc[0]["applicant_name"])
-        if len(matched) > 0
-        else "Unknown Applicant"
-    )
+    if len(matched) == 0:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "failed", "error": f"Application ID {application_id} not found"}
+        )
+
+    # Extract the exact string name safely
+    real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
 
     try:
         conn   = get_db_connection()
@@ -523,7 +509,6 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         # APPROVE
         if req.decision.upper() == "APPROVE":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'approved',
@@ -540,7 +525,6 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         # REJECT
         elif req.decision.upper() == "REJECT":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'rejected',
@@ -557,7 +541,6 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         # REVIEW
         elif req.decision.upper() == "REVIEW":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'under_review',
@@ -569,7 +552,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = notify_team_lead(application_id)
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL (FIXED)
+        # AUDIT TRAIL — Now saving the real applicant name to the database
         cursor.execute("""
             INSERT INTO audit_trail
             (application_id, decision, decision_notes, analyst_name, timestamp)
@@ -579,7 +562,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             application_id,
             req.decision.upper(),
             notes,
-            applicant_name
+            real_applicant_name
         ))
         audit_id = cursor.fetchone()[0]
 
@@ -589,17 +572,19 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         return {
             "application_id": application_id,
-            "audit_id": audit_id,
-            "status": req.decision.lower(),
-            "next_action": notification_type,
+            "applicant_name": real_applicant_name,  # Clean verification in the response
+            "audit_id":       audit_id,
+            "status":         req.decision.lower(),
+            "next_action":    notification_type,
             "notification_sent": notification_sent,
-            "message": "Decision processed successfully",
-            "applicant_name": applicant_name
+            "message":        "Decision processed successfully"
         }
 
     except Exception as e:
         if conn:
             conn.rollback()
+            if not cursor.closed:
+                cursor.close()
             conn.close()
 
         return JSONResponse(
