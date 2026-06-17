@@ -500,6 +500,9 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn  = None
 
+    # ✅ FIX: backend-controlled analyst identity
+    analyst_name = "SystemUser"
+
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -507,9 +510,7 @@ def process_decision(application_id: str, req: DecisionRequest):
         notification_sent = False
         notification_type = None
 
-        # ==========================================
         # APPROVE
-        # ==========================================
         if req.decision.upper() == "APPROVE":
 
             cursor.execute("""
@@ -526,9 +527,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             )
             notification_type = "approval_email"
 
-        # ==========================================
         # REJECT
-        # ==========================================
         elif req.decision.upper() == "REJECT":
 
             cursor.execute("""
@@ -545,9 +544,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             )
             notification_type = "rejection_email"
 
-        # ==========================================
         # REVIEW
-        # ==========================================
         elif req.decision.upper() == "REVIEW":
 
             cursor.execute("""
@@ -561,10 +558,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = notify_team_lead(application_id)
             notification_type = "internal_review_notification"
 
-        # ==========================================
-        # AUDIT TRAIL
-        # FIX 4: Corrected indentation (was 7 spaces, must be 8)
-        # ==========================================
+        # AUDIT TRAIL (FIXED)
         cursor.execute("""
             INSERT INTO audit_trail
             (application_id, decision, decision_notes, analyst_name, timestamp)
@@ -574,7 +568,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             application_id,
             req.decision.upper(),
             notes,
-            req.analyst_name   # FIX 5: Now works because analyst_name is in DecisionRequest
+            analyst_name   # ✅ FIXED HERE
         ))
 
         audit_id = cursor.fetchone()[0]
@@ -584,12 +578,13 @@ def process_decision(application_id: str, req: DecisionRequest):
         conn.close()
 
         return {
-            "application_id":    application_id,
-            "audit_id":          audit_id,
-            "status":            req.decision.lower(),
-            "next_action":       notification_type,
+            "application_id": application_id,
+            "audit_id": audit_id,
+            "status": req.decision.lower(),
+            "next_action": notification_type,
             "notification_sent": notification_sent,
-            "message":           "Decision processed successfully"
+            "message": "Decision processed successfully",
+            "analyst_name": analyst_name   # ✅ FIXED OUTPUT
         }
 
     except Exception as e:
@@ -597,17 +592,14 @@ def process_decision(application_id: str, req: DecisionRequest):
             conn.rollback()
             conn.close()
 
-        print(f"Decision failed for {application_id}: {str(e)}")
-
         return JSONResponse(
             status_code=500,
             content={
-                "status":         "failed",
+                "status": "failed",
                 "application_id": application_id,
-                "error":          str(e)
+                "error": str(e)
             }
         )
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
