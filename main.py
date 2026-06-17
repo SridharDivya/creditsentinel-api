@@ -404,23 +404,24 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        search_id = str(application_id).strip().upper()
+        # 1. Clean the incoming ID string perfectly
+        clean_search_id = str(application_id).strip().upper()
 
-        # Extract the absolute correct name from the code data source matrix
+        # 2. Extract the absolute correct name matching THIS specific ID from your CSV matrix
         matched = applications_df[
-            applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
+            applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
         ]
         
         if len(matched) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"Application ID {application_id} does not exist in the system"}
-            )
-            
-        csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
+            csv_applicant_name = "Unknown Applicant"
+        else:
+            csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
 
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -437,27 +438,21 @@ def get_decision_history(application_id: str):
             ORDER BY timestamp DESC
         """
 
-        cursor.execute(query, (search_id,))
+        cursor.execute(query, (clean_search_id,))
         rows = cursor.fetchall()
 
         cursor.close()
         conn.close()
 
-        # If there is no DB history but the applicant ID is valid, return the initialization structure
         if not rows:
-            return {
-                "application_id": application_id,
-                "applicant_name": csv_applicant_name,
-                "message": "No decision records have been submitted for this applicant yet.",
-                "history": []
-            }
+            return {"history": []}
 
         history = []
         for row in rows:
             db_value = row[4]
             db_str = str(db_value).strip() if db_value is not None else ""
             
-            # Dynamic Fallback Validation: If database has null/empty, fetch correct name from CSV matrix
+            # If database has null/empty from old runs, get the correct row-specific name
             if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
                 final_applicant_name = csv_applicant_name
             else:
@@ -475,7 +470,6 @@ def get_decision_history(application_id: str):
 
     except Exception as e:
         return {"error": str(e)}
-
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
