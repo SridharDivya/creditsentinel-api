@@ -444,7 +444,7 @@ ORDER BY timestamp DESC
                 "decision":     row[1],
                 "notes":        row[2],
                 "timestamp":    row[3].isoformat() if row[3] else None,
-                "analyst_name": row[4]
+                "applicant_name": row[4]
             })
 
         return {"history": history}
@@ -501,7 +501,16 @@ def process_decision(application_id: str, req: DecisionRequest):
     conn  = None
 
     # ✅ FIX: backend-controlled analyst identity
-    analyst_name = "SystemUser"
+    # GET REAL APPLICANT NAME FROM CSV (fallback safe)
+matched = applications_df[
+    applications_df["application_id"].astype(str) == str(application_id)
+]
+
+applicant_name = (
+    safe_str(matched.iloc[0]["applicant_name"])
+    if len(matched) > 0
+    else "Unknown Applicant"
+)
 
     try:
         conn   = get_db_connection()
@@ -560,17 +569,16 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         # AUDIT TRAIL (FIXED)
         cursor.execute("""
-            INSERT INTO audit_trail
-            (application_id, decision, decision_notes, analyst_name, timestamp)
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING audit_id
-        """, (
-            application_id,
-            req.decision.upper(),
-            notes,
-            analyst_name   # ✅ FIXED HERE
-        ))
-
+    INSERT INTO audit_trail
+    (application_id, decision, decision_notes, analyst_name, timestamp)
+    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+    RETURNING audit_id
+""", (
+    application_id,
+    req.decision.upper(),
+    notes,
+    applicant_name   # ✅ REPLACED
+))
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
@@ -584,7 +592,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             "next_action": notification_type,
             "notification_sent": notification_sent,
             "message": "Decision processed successfully",
-            "analyst_name": analyst_name   # ✅ FIXED OUTPUT
+            "applicant_name": applicant_name   # ✅ FIXED OUTPUT
         }
 
     except Exception as e:
