@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -457,8 +457,8 @@ def get_decision_history(application_id: str):
         cursor.execute(query, (clean_search_id,))
         rows = cursor.fetchall()
 
-       cursor.close()
-       db_pool.putconn(conn)
+        cursor.close()
+        db_pool.putconn(conn)
 
         if not rows:
             return {"history": []}
