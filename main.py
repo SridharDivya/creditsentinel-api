@@ -54,6 +54,9 @@ print("CSV COLUMNS:", list(applications_df.columns))
 TOTAL_APPLICATIONS = 15000
 
 # =========================================================
+# POSTGRESQL DATABASE CONNECTION
+# =========================================================
+# =========================================================
 # POSTGRESQL DATABASE CONNECTION WITH POOLING
 # =========================================================
 
@@ -246,10 +249,9 @@ class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
 class DecisionRequest(BaseModel):
-    decision:     str
-    notes:        Optional[str] = ""
-    analyst_name: Optional[str] = ""
-    timestamp:    Optional[str] = None
+    decision:  str
+    notes:     Optional[str] = ""
+    timestamp: Optional[str] = None
 
 # =========================================================
 # HEALTH
@@ -418,15 +420,20 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
+        # 1. Clean the incoming ID string perfectly
         clean_search_id = str(application_id).strip().upper()
 
+        # 2. Extract the absolute correct name matching THIS specific ID from your CSV matrix
         matched = applications_df[
             applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
         ]
-
+        
         if len(matched) == 0:
             csv_applicant_name = "Unknown Applicant"
         else:
@@ -435,13 +442,13 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Query the updated physical database column name cleanly!
         query = """
             SELECT audit_id,
                    decision,
                    decision_notes,
                    timestamp,
-                   applicant_name,
-                   analyst_name
+                   applicant_name
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -450,17 +457,18 @@ def get_decision_history(application_id: str):
         cursor.execute(query, (clean_search_id,))
         rows = cursor.fetchall()
 
-        cursor.close()
-        db_pool.putconn(conn)
+       cursor.close()
+       db_pool.putconn(conn)
 
         if not rows:
-            return {"history": [], "applicant_name": csv_applicant_name}
+            return {"history": []}
 
         history = []
         for row in rows:
             db_value = row[4]
             db_str = str(db_value).strip() if db_value is not None else ""
-
+            
+            # If database has null/empty from old runs, get the correct row-specific name
             if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
                 final_applicant_name = csv_applicant_name
             else:
@@ -471,44 +479,28 @@ def get_decision_history(application_id: str):
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_applicant_name,
-                "analyst_name":   safe_str(row[5]) if row[5] else None
+                "applicant_name": final_applicant_name
             })
 
-        return {"history": history, "applicant_name": csv_applicant_name}
+        return {"history": history}
 
     except Exception as e:
         return {"error": str(e)}
-
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
-    # Normalize incoming decision values
-    decision_map = {                        # FIX 1: removed stray leading space
-        "APPROVE":  "APPROVE",
-        "APPROVED": "APPROVE",
-        "REJECT":   "REJECT",
-        "REJECTED": "REJECT",
-        "REVIEW":   "REVIEW"
-    }
+    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
-    decision = str(req.decision).strip().upper()
-
-    if decision not in decision_map:
-        return {
-            "status": "failed",
-            "error": "Invalid decision. Allowed values: APPROVE, APPROVED, REJECT, REJECTED, REVIEW"
-        }
-
-    decision = decision_map[decision]
+    if req.decision.upper() not in valid_decisions:
+        return {"status": "failed", "error": "Invalid decision"}
 
     notes = req.notes or ""
-    conn = None
+    conn  = None
 
-    # LOOKUP CORRECT APPLICANT NAME FROM CSV DATA SOURCE
+    # LOOKUP CORRECT APPLICANT NAME FROM CODE DATA SOURCE MATRIX
     search_id = str(application_id).strip().upper()
     matched = applications_df[
         applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
@@ -531,7 +523,7 @@ def process_decision(application_id: str, req: DecisionRequest):
         notification_type = None
 
         # APPROVE
-        if decision == "APPROVE":
+        if req.decision.upper() == "APPROVE":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'approved',
@@ -539,11 +531,12 @@ def process_decision(application_id: str, req: DecisionRequest):
                 WHERE UPPER(TRIM(application_id)) = %s
             """, (search_id,))
 
-            notification_sent = True
+            # Placeholder for email alerts matching codebase context
+            notification_sent = True 
             notification_type = "approval_email"
 
         # REJECT
-        elif decision == "REJECT":
+        elif req.decision.upper() == "REJECT":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'rejected',
@@ -555,7 +548,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_type = "rejection_email"
 
         # REVIEW
-        elif decision == "REVIEW":
+        elif req.decision.upper() == "REVIEW":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'under_review',
@@ -567,19 +560,17 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = True
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL
-        analyst_name = req.analyst_name or ""
+        # AUDIT TRAIL — Saving straight to the correct physical applicant_name column layout
         cursor.execute("""
             INSERT INTO audit_trail
-            (application_id, decision, decision_notes, applicant_name, analyst_name, timestamp)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            (application_id, decision, decision_notes, applicant_name, timestamp)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
         """, (
             application_id,
-            decision,
+            req.decision.upper(),
             notes,
-            real_applicant_name,
-            analyst_name
+            real_applicant_name
         ))
         audit_id = cursor.fetchone()[0]
 
@@ -588,14 +579,13 @@ def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
 
         return {
-            "application_id":    application_id,
-            "applicant_name":    real_applicant_name,
-            "analyst_name":      analyst_name,
-            "audit_id":          audit_id,
-            "status":            req.decision.lower(),
-            "next_action":       notification_type,
+            "application_id": application_id,
+            "applicant_name": real_applicant_name,  
+            "audit_id":       audit_id,
+            "status":         req.decision.lower(),
+            "next_action":    notification_type,
             "notification_sent": notification_sent,
-            "message":           "Decision processed successfully"
+            "message":        "Decision processed successfully"
         }
 
     except Exception as e:
@@ -608,9 +598,9 @@ def process_decision(application_id: str, req: DecisionRequest):
         return JSONResponse(
             status_code=500,
             content={
-                "status":         "failed",
+                "status": "failed",
                 "application_id": application_id,
-                "error":          str(e)
+                "error": str(e)
             }
         )
 
