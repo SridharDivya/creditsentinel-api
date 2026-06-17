@@ -417,12 +417,19 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # 1. Fetch the real applicant name from the CSV matrix first
+        # 1. Clean the incoming application ID string
+        search_id = str(application_id).strip().upper()
+
+        # 2. Safely look up the real applicant name from the CSV matrix first
+        # We use a lambda to cleanly apply string operations across the column
         matched = applications_df[
-            applications_df["application_id"].astype(str).str.strip().str.upper() == str(application_id).strip().str.upper()
+            applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
         ]
         
         if len(matched) == 0:
@@ -436,7 +443,7 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query the renamed physical column cleanly
+        # Query the physical database table column cleanly
         query = """
             SELECT audit_id,
                    decision,
@@ -444,17 +451,17 @@ def get_decision_history(application_id: str):
                    timestamp,
                    applicant_name
             FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = UPPER(TRIM(%s))
+            WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
         """
 
-        cursor.execute(query, (application_id,))
+        cursor.execute(query, (search_id,))
         rows = cursor.fetchall()
 
         cursor.close()
         conn.close()
 
-        # 2. ✅ FIXED: If there is no DB history but the applicant is real, show an initialization message
+        # 3. If there is no DB history but the applicant is real, show an initialization message
         if not rows:
             return {
                 "application_id": application_id,
