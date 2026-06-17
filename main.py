@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -18,13 +18,12 @@ from feature_engine import compute_features
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
 # =========================================================
 # DATABASE CONNECTION (RENDER POSTGRESQL)
 # =========================================================
 import psycopg2
 from fastapi.responses import JSONResponse
-
-
 
 
 # =========================================================
@@ -235,11 +234,11 @@ class ScoreRequest(BaseModel):
 class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
-# FIX 1: Added analyst_name field to DecisionRequest
 class DecisionRequest(BaseModel):
     decision:     str
     notes:        Optional[str] = ""
-    analyst_name: Optional[str] = "Unknown"   # ← ADDED: was missing, caused analyst_name = null
+    # ✅ analyst_name is accepted from the frontend (real logged-in user's name)
+    analyst_name: Optional[str] = "Unknown"
     timestamp:    Optional[str] = None
 
 # =========================================================
@@ -415,7 +414,6 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # FIX 2: Corrected indentation (was 7 spaces, must be 8)
         query = """
 SELECT audit_id,
        decision,
@@ -438,13 +436,13 @@ ORDER BY timestamp DESC
 
         history = []
         for row in rows:
-            # FIX 3: Corrected indentation on history.append block
             history.append({
                 "audit_id":     row[0],
                 "decision":     row[1],
                 "notes":        row[2],
                 "timestamp":    row[3].isoformat() if row[3] else None,
-                "analyst_name": row[4]
+                # ✅ Show "Unknown" instead of null for old records missing analyst_name
+                "analyst_name": row[4] if row[4] else "Unknown"
             })
 
         return {"history": history}
@@ -500,8 +498,9 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn  = None
 
-    # ✅ FIX: backend-controlled analyst identity
-    analyst_name = "SystemUser"
+    # ✅ FIX: Use the real analyst name sent from the frontend.
+    #         Strip and fall back to "Unknown" if blank/missing.
+    analyst_name = (req.analyst_name or "").strip() or "Unknown"
 
     try:
         conn   = get_db_connection()
@@ -558,7 +557,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = notify_team_lead(application_id)
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL (FIXED)
+        # ✅ AUDIT TRAIL — stores the real analyst name from the request
         cursor.execute("""
             INSERT INTO audit_trail
             (application_id, decision, decision_notes, analyst_name, timestamp)
@@ -568,7 +567,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             application_id,
             req.decision.upper(),
             notes,
-            analyst_name   # ✅ FIXED HERE
+            analyst_name       # ✅ real name stored here
         ))
 
         audit_id = cursor.fetchone()[0]
@@ -578,13 +577,13 @@ def process_decision(application_id: str, req: DecisionRequest):
         conn.close()
 
         return {
-            "application_id": application_id,
-            "audit_id": audit_id,
-            "status": req.decision.lower(),
-            "next_action": notification_type,
+            "application_id":    application_id,
+            "audit_id":          audit_id,
+            "status":            req.decision.lower(),
+            "next_action":       notification_type,
             "notification_sent": notification_sent,
-            "message": "Decision processed successfully",
-            "analyst_name": analyst_name   # ✅ FIXED OUTPUT
+            "message":           "Decision processed successfully",
+            "analyst_name":      analyst_name    # ✅ echoed back in response
         }
 
     except Exception as e:
@@ -595,11 +594,12 @@ def process_decision(application_id: str, req: DecisionRequest):
         return JSONResponse(
             status_code=500,
             content={
-                "status": "failed",
+                "status":         "failed",
                 "application_id": application_id,
-                "error": str(e)
+                "error":          str(e)
             }
         )
+
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
@@ -687,4 +687,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
-   
