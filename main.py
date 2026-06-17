@@ -1,4 +1,4 @@
-
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -22,8 +22,10 @@ from email.mime.multipart import MIMEMultipart
 # DATABASE CONNECTION (RENDER POSTGRESQL)
 # =========================================================
 import psycopg2
-from psycopg2 import pool
 from fastapi.responses import JSONResponse
+
+
+
 
 # =========================================================
 # FASTAPI APP
@@ -56,39 +58,24 @@ TOTAL_APPLICATIONS = 15000
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
 # =========================================================
-# =========================================================
-# POSTGRESQL DATABASE CONNECTION WITH POOLING
-# =========================================================
-
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT"),
-    "database": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD")
+    "host":     "dpg-d8j9bhernols73cff9t0-a",
+    "port":     5432,
+    "database": "creditsentinel_db_r67r",
+    "user":     "creditsentinel_db_r67r_user",
+    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"
 }
 
-db_pool = pool.SimpleConnectionPool(
-    minconn=1,
-    maxconn=30,
-    host=DB_CONFIG["host"],
-    port=DB_CONFIG["port"],
-    database=DB_CONFIG["database"],
-    user=DB_CONFIG["user"],
-    password=DB_CONFIG["password"]
-)
-
-print("✅ Connection Pool Initialized")
-
 def get_db_connection():
-    """Get connection from pool"""
-    return db_pool.getconn()
+    """Create and return a new PostgreSQL connection"""
+    conn = psycopg2.connect(**DB_CONFIG)
+    return conn
 
+# Test DB connection on startup
 try:
     conn_test = get_db_connection()
-    db_pool.putconn(conn_test)
+    conn_test.close()
     print("✅ PostgreSQL Connected")
-
 except Exception as e:
     print(f"❌ PostgreSQL Connection Failed: {e}")
 
@@ -248,10 +235,12 @@ class ScoreRequest(BaseModel):
 class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
+# FIX 1: Added analyst_name field to DecisionRequest
 class DecisionRequest(BaseModel):
-    decision:  str
-    notes:     Optional[str] = ""
-    timestamp: Optional[str] = None
+    decision:     str
+    notes:        Optional[str] = ""
+    analyst_name: Optional[str] = "Unknown"   # ← ADDED: was missing, caused analyst_name = null
+    timestamp:    Optional[str] = None
 
 # =========================================================
 # HEALTH
@@ -420,72 +409,83 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # 1. Clean the incoming ID string perfectly
-        clean_search_id = str(application_id).strip().upper()
-
-        # 2. Extract the absolute correct name matching THIS specific ID from your CSV matrix
-        matched = applications_df[
-            applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
-        ]
-        
-        if len(matched) == 0:
-            csv_applicant_name = "Unknown Applicant"
-        else:
-            csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
-
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query the updated physical database column name cleanly!
+        # FIX 2: Corrected indentation (was 7 spaces, must be 8)
         query = """
-            SELECT audit_id,
-                   decision,
-                   decision_notes,
-                   timestamp,
-                   applicant_name
-            FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
-            ORDER BY timestamp DESC
-        """
+SELECT audit_id,
+       decision,
+       decision_notes,
+       timestamp,
+       analyst_name
+FROM audit_trail
+WHERE application_id = %s
+ORDER BY timestamp DESC
+"""
 
-        cursor.execute(query, (clean_search_id,))
+        cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
 
         cursor.close()
-        db_pool.putconn(conn)
+        conn.close()
 
         if not rows:
             return {"history": []}
 
         history = []
         for row in rows:
-            db_value = row[4]
-            db_str = str(db_value).strip() if db_value is not None else ""
-            
-            # If database has null/empty from old runs, get the correct row-specific name
-            if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
-                final_applicant_name = csv_applicant_name
-            else:
-                final_applicant_name = safe_str(db_value)
-
+            # FIX 3: Corrected indentation on history.append block
             history.append({
-                "audit_id":       row[0],
-                "decision":       row[1],
-                "notes":          row[2],
-                "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_applicant_name
+                "audit_id":     row[0],
+                "decision":     row[1],
+                "notes":        row[2],
+                "timestamp":    row[3].isoformat() if row[3] else None,
+                "analyst_name": row[4]
             })
 
         return {"history": history}
 
     except Exception as e:
         return {"error": str(e)}
+
+# =========================================================
+# NOTIFICATION HELPERS
+# =========================================================
+def send_email(application_id: str, subject: str, body: str):
+    try:
+        recipient = f"{application_id.lower()}@example.com"
+
+        message = MIMEMultipart()
+        message["From"]    = FROM_EMAIL
+        message["To"]      = recipient
+        message["Subject"] = subject
+
+        message.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT)
+        server.starttls()
+        server.login(MAILTRAP_USERNAME, MAILTRAP_PASSWORD)
+        server.sendmail(FROM_EMAIL, recipient, message.as_string())
+        server.quit()
+
+        print(f"Mailtrap email sent to {recipient}")
+        return True
+
+    except Exception as e:
+        print(f"Mailtrap email failed: {str(e)}")
+        return False
+
+
+def notify_team_lead(application_id: str):
+    print("\n===== INTERNAL NOTIFICATION =====")
+    print(f"{application_id} assigned to TEAM_LEAD")
+    print("=================================\n")
+    return True
+
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
@@ -500,20 +500,8 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn  = None
 
-    # LOOKUP CORRECT APPLICANT NAME FROM CODE DATA SOURCE MATRIX
-    search_id = str(application_id).strip().upper()
-    matched = applications_df[
-        applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
-    ]
-
-    if len(matched) == 0:
-        return JSONResponse(
-            status_code=404,
-            content={"status": "failed", "error": f"Application ID {application_id} not found"}
-        )
-
-    # Extract the exact string name safely from DataFrame mapping
-    real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
+    # ✅ FIX: backend-controlled analyst identity
+    analyst_name = "SystemUser"
 
     try:
         conn   = get_db_connection()
@@ -524,76 +512,85 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         # APPROVE
         if req.decision.upper() == "APPROVE":
+
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'approved',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE UPPER(TRIM(application_id)) = %s
-            """, (search_id,))
+                WHERE application_id = %s
+            """, (application_id,))
 
-            # Placeholder for email alerts matching codebase context
-            notification_sent = True 
+            notification_sent = send_email(
+                application_id,
+                "Loan Approved",
+                "Congratulations! Your loan application has been approved."
+            )
             notification_type = "approval_email"
 
         # REJECT
         elif req.decision.upper() == "REJECT":
+
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'rejected',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE UPPER(TRIM(application_id)) = %s
-            """, (search_id,))
+                WHERE application_id = %s
+            """, (application_id,))
 
-            notification_sent = True
+            notification_sent = send_email(
+                application_id,
+                "Loan Rejected",
+                f"Your loan application was rejected.\nReason: {notes}"
+            )
             notification_type = "rejection_email"
 
         # REVIEW
         elif req.decision.upper() == "REVIEW":
+
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'under_review',
                     assigned_reviewer = 'TEAM_LEAD',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE UPPER(TRIM(application_id)) = %s
-            """, (search_id,))
+                WHERE application_id = %s
+            """, (application_id,))
 
-            notification_sent = True
+            notification_sent = notify_team_lead(application_id)
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL — Saving straight to the correct physical applicant_name column layout
+        # AUDIT TRAIL (FIXED)
         cursor.execute("""
             INSERT INTO audit_trail
-            (application_id, decision, decision_notes, applicant_name, timestamp)
+            (application_id, decision, decision_notes, analyst_name, timestamp)
             VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
         """, (
             application_id,
             req.decision.upper(),
             notes,
-            real_applicant_name
+            analyst_name   # ✅ FIXED HERE
         ))
+
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
         cursor.close()
-        db_pool.putconn(conn)
+        conn.close()
 
         return {
             "application_id": application_id,
-            "applicant_name": real_applicant_name,  
-            "audit_id":       audit_id,
-            "status":         req.decision.lower(),
-            "next_action":    notification_type,
+            "audit_id": audit_id,
+            "status": req.decision.lower(),
+            "next_action": notification_type,
             "notification_sent": notification_sent,
-            "message":        "Decision processed successfully"
+            "message": "Decision processed successfully",
+            "analyst_name": analyst_name   # ✅ FIXED OUTPUT
         }
 
     except Exception as e:
         if conn:
             conn.rollback()
-            if not cursor.closed:
-                cursor.close()
-            db_pool.putconn(conn)
+            conn.close()
 
         return JSONResponse(
             status_code=500,
@@ -603,7 +600,6 @@ def process_decision(application_id: str, req: DecisionRequest):
                 "error": str(e)
             }
         )
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
@@ -691,3 +687,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+   
