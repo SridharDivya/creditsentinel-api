@@ -22,6 +22,7 @@ from email.mime.multipart import MIMEMultipart
 # DATABASE CONNECTION (RENDER POSTGRESQL)
 # =========================================================
 import psycopg2
+from psycopg2 import pool
 from fastapi.responses import JSONResponse
 
 # =========================================================
@@ -55,26 +56,36 @@ TOTAL_APPLICATIONS = 15000
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
 # =========================================================
+import os
 DB_CONFIG = {
-    "host":     "dpg-d8j9bhernols73cff9t0-a",
-    "port":     5432,
-    "database": "creditsentinel_db_r67r",
-    "user":     "creditsentinel_db_r67r_user",
-    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"
+
+"host": os.getenv("DB_HOST"),
+"port": os.getenv("DB_PORT"),
+"database": os.getenv("DB_NAME"),
+"user": os.getenv("DB_USER"),
+"password": os.getenv("DB_PASSWORD")
 }
-
+# Connection Pool (10 base + 20 overflow = 30 max)
+db_pool = pool.SimpleConnectionPool(
+minconn=1,
+maxconn=30,
+host=DB_CONFIG["host"],
+port=DB_CONFIG["port"],
+database=DB_CONFIG["database"],
+user=DB_CONFIG["user"],
+password=DB_CONFIG["password"]
+)
+print("✅ Connection Pool Initialized")
 def get_db_connection():
-    """Create and return a new PostgreSQL connection"""
-    conn = psycopg2.connect(**DB_CONFIG)
-    return conn
-
+"""Get connection from pool"""
+return db_pool.getconn()
 # Test DB connection on startup
 try:
-    conn_test = get_db_connection()
-    conn_test.close()
-    print("✅ PostgreSQL Connected")
+conn_test = get_db_connection()
+db_pool.putconn(conn_test)
+print("✅ PostgreSQL Connected")
 except Exception as e:
-    print(f"❌ PostgreSQL Connection Failed: {e}")
+print(f"❌ PostgreSQL Connection Failed: {e}")
 
 # =========================================================
 # MODEL FEATURES
@@ -441,8 +452,8 @@ def get_decision_history(application_id: str):
         cursor.execute(query, (clean_search_id,))
         rows = cursor.fetchall()
 
-        cursor.close()
-        conn.close()
+       cursor.close()
+       db_pool.putconn(conn)
 
         if not rows:
             return {"history": []}
@@ -560,7 +571,7 @@ def process_decision(application_id: str, req: DecisionRequest):
 
         conn.commit()
         cursor.close()
-        conn.close()
+        db_pool.putconn(conn)
 
         return {
             "application_id": application_id,
@@ -577,7 +588,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             conn.rollback()
             if not cursor.closed:
                 cursor.close()
-            conn.close()
+            db_pool.putconn(conn)
 
         return JSONResponse(
             status_code=500,
