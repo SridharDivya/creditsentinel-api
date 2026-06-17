@@ -57,35 +57,41 @@ TOTAL_APPLICATIONS = 15000
 # POSTGRESQL DATABASE CONNECTION
 # =========================================================
 import os
-DB_CONFIG = {
+# =========================================================
+# POSTGRESQL DATABASE CONNECTION WITH POOLING
+# =========================================================
 
-"host": os.getenv("DB_HOST"),
-"port": os.getenv("DB_PORT"),
-"database": os.getenv("DB_NAME"),
-"user": os.getenv("DB_USER"),
-"password": os.getenv("DB_PASSWORD")
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "port": os.getenv("DB_PORT"),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD")
 }
-# Connection Pool (10 base + 20 overflow = 30 max)
+
 db_pool = pool.SimpleConnectionPool(
-minconn=1,
-maxconn=30,
-host=DB_CONFIG["host"],
-port=DB_CONFIG["port"],
-database=DB_CONFIG["database"],
-user=DB_CONFIG["user"],
-password=DB_CONFIG["password"]
+    minconn=1,
+    maxconn=30,
+    host=DB_CONFIG["host"],
+    port=DB_CONFIG["port"],
+    database=DB_CONFIG["database"],
+    user=DB_CONFIG["user"],
+    password=DB_CONFIG["password"]
 )
+
 print("✅ Connection Pool Initialized")
+
 def get_db_connection():
-"""Get connection from pool"""
-return db_pool.getconn()
-# Test DB connection on startup
+    """Get connection from pool"""
+    return db_pool.getconn()
+
 try:
-conn_test = get_db_connection()
-db_pool.putconn(conn_test)
-print("✅ PostgreSQL Connected")
+    conn_test = get_db_connection()
+    db_pool.putconn(conn_test)
+    print("✅ PostgreSQL Connected")
+
 except Exception as e:
-print(f"❌ PostgreSQL Connection Failed: {e}")
+    print(f"❌ PostgreSQL Connection Failed: {e}")
 
 # =========================================================
 # MODEL FEATURES
