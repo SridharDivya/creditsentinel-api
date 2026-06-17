@@ -489,6 +489,9 @@ def notify_team_lead(application_id: str):
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — POST /api/applications/{id}/process-decision
+# =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
@@ -500,17 +503,16 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn  = None
 
-    # ✅ FIX: backend-controlled analyst identity
-    # GET REAL APPLICANT NAME FROM CSV (fallback safe)
-matched = applications_df[
-    applications_df["application_id"].astype(str) == str(application_id)
-]
+    # ✅ FIXED INDENTATION: Safely nested inside the function
+    matched = applications_df[
+        applications_df["application_id"].astype(str) == str(application_id)
+    ]
 
-applicant_name = (
-    safe_str(matched.iloc[0]["applicant_name"])
-    if len(matched) > 0
-    else "Unknown Applicant"
-)
+    applicant_name = (
+        safe_str(matched.iloc[0]["applicant_name"])
+        if len(matched) > 0
+        else "Unknown Applicant"
+    )
 
     try:
         conn   = get_db_connection()
@@ -569,16 +571,16 @@ applicant_name = (
 
         # AUDIT TRAIL (FIXED)
         cursor.execute("""
-    INSERT INTO audit_trail
-    (application_id, decision, decision_notes, analyst_name, timestamp)
-    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-    RETURNING audit_id
-""", (
-    application_id,
-    req.decision.upper(),
-    notes,
-    applicant_name   # ✅ REPLACED
-))
+            INSERT INTO audit_trail
+            (application_id, decision, decision_notes, analyst_name, timestamp)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (
+            application_id,
+            req.decision.upper(),
+            notes,
+            applicant_name
+        ))
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
@@ -592,7 +594,7 @@ applicant_name = (
             "next_action": notification_type,
             "notification_sent": notification_sent,
             "message": "Decision processed successfully",
-            "applicant_name": applicant_name   # ✅ FIXED OUTPUT
+            "applicant_name": applicant_name
         }
 
     except Exception as e:
