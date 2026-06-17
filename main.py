@@ -246,9 +246,10 @@ class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
 class DecisionRequest(BaseModel):
-    decision:  str
-    notes:     Optional[str] = ""
-    timestamp: Optional[str] = None
+    decision:     str
+    notes:        Optional[str] = ""
+    analyst_name: Optional[str] = ""
+    timestamp:    Optional[str] = None
 
 # =========================================================
 # HEALTH
@@ -439,7 +440,8 @@ def get_decision_history(application_id: str):
                    decision,
                    decision_notes,
                    timestamp,
-                   applicant_name
+                   applicant_name,
+                   analyst_name
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -452,7 +454,7 @@ def get_decision_history(application_id: str):
         db_pool.putconn(conn)
 
         if not rows:
-            return {"history": []}
+            return {"history": [], "applicant_name": csv_applicant_name}
 
         history = []
         for row in rows:
@@ -469,10 +471,11 @@ def get_decision_history(application_id: str):
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_applicant_name
+                "applicant_name": final_applicant_name,
+                "analyst_name":   safe_str(row[5]) if row[5] else None
             })
 
-        return {"history": history}
+        return {"history": history, "applicant_name": csv_applicant_name}
 
     except Exception as e:
         return {"error": str(e)}
@@ -565,16 +568,18 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_type = "internal_review_notification"
 
         # AUDIT TRAIL
-        cursor.execute("""                  
+        analyst_name = req.analyst_name or ""
+        cursor.execute("""
             INSERT INTO audit_trail
-            (application_id, decision, decision_notes, applicant_name, timestamp)
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            (application_id, decision, decision_notes, applicant_name, analyst_name, timestamp)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
-        """, (                              # FIX 2: consistent 8-space indent throughout
+        """, (
             application_id,
             decision,
             notes,
-            real_applicant_name
+            real_applicant_name,
+            analyst_name
         ))
         audit_id = cursor.fetchone()[0]
 
@@ -585,6 +590,7 @@ def process_decision(application_id: str, req: DecisionRequest):
         return {
             "application_id":    application_id,
             "applicant_name":    real_applicant_name,
+            "analyst_name":      analyst_name,
             "audit_id":          audit_id,
             "status":            req.decision.lower(),
             "next_action":       notification_type,
