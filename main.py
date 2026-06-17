@@ -492,10 +492,24 @@ def get_decision_history(application_id: str):
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
-    valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
+    # Normalize incoming decision values
+decision_map = {
+    "APPROVE": "APPROVE",
+    "APPROVED": "APPROVE",
+    "REJECT": "REJECT",
+    "REJECTED": "REJECT",
+    "REVIEW": "REVIEW"
+}
 
-    if req.decision.upper() not in valid_decisions:
-        return {"status": "failed", "error": "Invalid decision"}
+decision = str(req.decision).strip().upper()
+
+if decision not in decision_map:
+    return {
+        "status": "failed",
+        "error": f"Invalid decision. Allowed values: APPROVE, APPROVED, REJECT, REJECTED, REVIEW"
+    }
+
+decision = decision_map[decision]
 
     notes = req.notes or ""
     conn  = None
@@ -523,7 +537,7 @@ def process_decision(application_id: str, req: DecisionRequest):
         notification_type = None
 
         # APPROVE
-        if req.decision.upper() == "APPROVE":
+        if decision == "APPROVE":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'approved',
@@ -536,7 +550,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_type = "approval_email"
 
         # REJECT
-        elif req.decision.upper() == "REJECT":
+        elif decision == "REJECT":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'rejected',
@@ -548,7 +562,7 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_type = "rejection_email"
 
         # REVIEW
-        elif req.decision.upper() == "REVIEW":
+        elif decision == "REVIEW":
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'under_review',
@@ -561,17 +575,17 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_type = "internal_review_notification"
 
         # AUDIT TRAIL — Saving straight to the correct physical applicant_name column layout
-        cursor.execute("""
-            INSERT INTO audit_trail
-            (application_id, decision, decision_notes, applicant_name, timestamp)
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING audit_id
-        """, (
-            application_id,
-            req.decision.upper(),
-            notes,
-            real_applicant_name
-        ))
+   cursor.execute("""
+    INSERT INTO audit_trail
+    (application_id, decision, decision_notes, applicant_name, timestamp)
+    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+    RETURNING audit_id
+""", (
+    application_id,
+    decision,
+    notes,
+    real_applicant_name
+))
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
