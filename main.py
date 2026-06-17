@@ -414,79 +414,55 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # 1. Clean the incoming application ID string
-        search_id = str(application_id).strip().upper()
-
-        # 2. Safely look up the real applicant name from the CSV matrix first
-        # We use a lambda to cleanly apply string operations across the column
+        # Cross-reference with the CSV to grab the true applicant name fallback
         matched = applications_df[
-            applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
+            applications_df["application_id"].astype(str) == str(application_id)
         ]
-        
-        if len(matched) == 0:
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"Application ID {application_id} does not exist in the system"}
-            )
-            
-        csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
+        csv_applicant_name = (
+            safe_str(matched.iloc[0]["applicant_name"])
+            if len(matched) > 0
+            else "Unknown Applicant"
+        )
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query the physical database table column cleanly
         query = """
             SELECT audit_id,
                    decision,
                    decision_notes,
                    timestamp,
-                   applicant_name
+                   analyst_name
             FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
+            WHERE application_id = %s
             ORDER BY timestamp DESC
         """
 
-        cursor.execute(query, (search_id,))
+        cursor.execute(query, (application_id,))
         rows = cursor.fetchall()
 
         cursor.close()
         conn.close()
 
-        # 3. If there is no DB history but the applicant is real, show an initialization message
         if not rows:
-            return {
-                "application_id": application_id,
-                "applicant_name": csv_applicant_name,
-                "message": "No decision records have been submitted for this applicant yet.",
-                "history": []
-            }
+            return {"history": []}
 
         history = []
         for row in rows:
-            db_value = row[4]
-            db_str = str(db_value).strip() if db_value is not None else ""
+            db_analyst_name = row[4]
             
-            # Catch database NULL values or literal string "None" wrappers
-            if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
-                final_applicant_name = csv_applicant_name
-            else:
-                final_applicant_name = safe_str(db_value)
+            # ✅ FALLBACK: If DB has null/empty for historic runs, use the CSV real name
+            final_name = db_analyst_name if (db_analyst_name and db_analyst_name.strip()) else csv_applicant_name
 
             history.append({
                 "audit_id":       row[0],
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_applicant_name
+                "applicant_name": final_name
             })
 
         return {"history": history}
@@ -706,4 +682,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
-   
