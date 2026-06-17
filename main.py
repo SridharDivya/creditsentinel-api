@@ -414,30 +414,37 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
+# =========================================================
+# AUDIT TRAIL — GET /api/applications/{id}/history
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # Cross-reference with the CSV to grab the true applicant name fallback
+        # 1. Fetch the real applicant name from the CSV matrix first
         matched = applications_df[
-            applications_df["application_id"].astype(str) == str(application_id)
+            applications_df["application_id"].astype(str).str.strip().str.upper() == str(application_id).strip().str.upper()
         ]
-        csv_applicant_name = (
-            safe_str(matched.iloc[0]["applicant_name"])
-            if len(matched) > 0
-            else "Unknown Applicant"
-        )
+        
+        if len(matched) == 0:
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"Application ID {application_id} does not exist in the system"}
+            )
+            
+        csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
 
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Query the renamed physical column cleanly
         query = """
             SELECT audit_id,
                    decision,
                    decision_notes,
                    timestamp,
-                   analyst_name
+                   applicant_name
             FROM audit_trail
-            WHERE application_id = %s
+            WHERE UPPER(TRIM(application_id)) = UPPER(TRIM(%s))
             ORDER BY timestamp DESC
         """
 
@@ -447,22 +454,32 @@ def get_decision_history(application_id: str):
         cursor.close()
         conn.close()
 
+        # 2. ✅ FIXED: If there is no DB history but the applicant is real, show an initialization message
         if not rows:
-            return {"history": []}
+            return {
+                "application_id": application_id,
+                "applicant_name": csv_applicant_name,
+                "message": "No decision records have been submitted for this applicant yet.",
+                "history": []
+            }
 
         history = []
         for row in rows:
-            db_analyst_name = row[4]
+            db_value = row[4]
+            db_str = str(db_value).strip() if db_value is not None else ""
             
-            # ✅ FALLBACK: If DB has null/empty for historic runs, use the CSV real name
-            final_name = db_analyst_name if (db_analyst_name and db_analyst_name.strip()) else csv_applicant_name
+            # Catch database NULL values or literal string "None" wrappers
+            if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
+                final_applicant_name = csv_applicant_name
+            else:
+                final_applicant_name = safe_str(db_value)
 
             history.append({
                 "audit_id":       row[0],
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_name
+                "applicant_name": final_applicant_name
             })
 
         return {"history": history}
