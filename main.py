@@ -54,9 +54,6 @@ print("CSV COLUMNS:", list(applications_df.columns))
 TOTAL_APPLICATIONS = 15000
 
 # =========================================================
-# POSTGRESQL DATABASE CONNECTION
-# =========================================================
-# =========================================================
 # POSTGRESQL DATABASE CONNECTION WITH POOLING
 # =========================================================
 
@@ -420,20 +417,15 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # 1. Clean the incoming ID string perfectly
         clean_search_id = str(application_id).strip().upper()
 
-        # 2. Extract the absolute correct name matching THIS specific ID from your CSV matrix
         matched = applications_df[
             applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
         ]
-        
+
         if len(matched) == 0:
             csv_applicant_name = "Unknown Applicant"
         else:
@@ -442,7 +434,6 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query the updated physical database column name cleanly!
         query = """
             SELECT audit_id,
                    decision,
@@ -467,8 +458,7 @@ def get_decision_history(application_id: str):
         for row in rows:
             db_value = row[4]
             db_str = str(db_value).strip() if db_value is not None else ""
-            
-            # If database has null/empty from old runs, get the correct row-specific name
+
             if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
                 final_applicant_name = csv_applicant_name
             else:
@@ -486,6 +476,7 @@ def get_decision_history(application_id: str):
 
     except Exception as e:
         return {"error": str(e)}
+
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
@@ -493,12 +484,12 @@ def get_decision_history(application_id: str):
 def process_decision(application_id: str, req: DecisionRequest):
 
     # Normalize incoming decision values
-     decision_map = {
-        "APPROVE": "APPROVE",
+    decision_map = {                        # FIX 1: removed stray leading space
+        "APPROVE":  "APPROVE",
         "APPROVED": "APPROVE",
-        "REJECT": "REJECT",
+        "REJECT":   "REJECT",
         "REJECTED": "REJECT",
-        "REVIEW": "REVIEW"
+        "REVIEW":   "REVIEW"
     }
 
     decision = str(req.decision).strip().upper()
@@ -514,7 +505,7 @@ def process_decision(application_id: str, req: DecisionRequest):
     notes = req.notes or ""
     conn = None
 
-    # LOOKUP CORRECT APPLICANT NAME FROM CODE DATA SOURCE MATRIX
+    # LOOKUP CORRECT APPLICANT NAME FROM CSV DATA SOURCE
     search_id = str(application_id).strip().upper()
     matched = applications_df[
         applications_df["application_id"].astype(str).apply(lambda x: x.strip().upper()) == search_id
@@ -545,8 +536,7 @@ def process_decision(application_id: str, req: DecisionRequest):
                 WHERE UPPER(TRIM(application_id)) = %s
             """, (search_id,))
 
-            # Placeholder for email alerts matching codebase context
-            notification_sent = True 
+            notification_sent = True
             notification_type = "approval_email"
 
         # REJECT
@@ -574,18 +564,18 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = True
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL — Saving straight to the correct physical applicant_name column layout
-   cursor.execute("""
-    INSERT INTO audit_trail
-    (application_id, decision, decision_notes, applicant_name, timestamp)
-    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-    RETURNING audit_id
-""", (
-    application_id,
-    decision,
-    notes,
-    real_applicant_name
-))
+        # AUDIT TRAIL
+        cursor.execute("""                  
+            INSERT INTO audit_trail
+            (application_id, decision, decision_notes, applicant_name, timestamp)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (                              # FIX 2: consistent 8-space indent throughout
+            application_id,
+            decision,
+            notes,
+            real_applicant_name
+        ))
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
@@ -593,13 +583,13 @@ def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
 
         return {
-            "application_id": application_id,
-            "applicant_name": real_applicant_name,  
-            "audit_id":       audit_id,
-            "status":         req.decision.lower(),
-            "next_action":    notification_type,
+            "application_id":    application_id,
+            "applicant_name":    real_applicant_name,
+            "audit_id":          audit_id,
+            "status":            req.decision.lower(),
+            "next_action":       notification_type,
             "notification_sent": notification_sent,
-            "message":        "Decision processed successfully"
+            "message":           "Decision processed successfully"
         }
 
     except Exception as e:
@@ -612,9 +602,9 @@ def process_decision(application_id: str, req: DecisionRequest):
         return JSONResponse(
             status_code=500,
             content={
-                "status": "failed",
+                "status":         "failed",
                 "application_id": application_id,
-                "error": str(e)
+                "error":          str(e)
             }
         )
 
