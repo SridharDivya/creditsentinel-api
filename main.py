@@ -493,26 +493,26 @@ def get_decision_history(application_id: str):
 def process_decision(application_id: str, req: DecisionRequest):
 
     # Normalize incoming decision values
-decision_map = {
-    "APPROVE": "APPROVE",
-    "APPROVED": "APPROVE",
-    "REJECT": "REJECT",
-    "REJECTED": "REJECT",
-    "REVIEW": "REVIEW"
-}
-
-decision = str(req.decision).strip().upper()
-
-if decision not in decision_map:
-    return {
-        "status": "failed",
-        "error": f"Invalid decision. Allowed values: APPROVE, APPROVED, REJECT, REJECTED, REVIEW"
+     decision_map = {
+        "APPROVE": "APPROVE",
+        "APPROVED": "APPROVE",
+        "REJECT": "REJECT",
+        "REJECTED": "REJECT",
+        "REVIEW": "REVIEW"
     }
 
-decision = decision_map[decision]
+    decision = str(req.decision).strip().upper()
+
+    if decision not in decision_map:
+        return {
+            "status": "failed",
+            "error": "Invalid decision. Allowed values: APPROVE, APPROVED, REJECT, REJECTED, REVIEW"
+        }
+
+    decision = decision_map[decision]
 
     notes = req.notes or ""
-    conn  = None
+    conn = None
 
     # LOOKUP CORRECT APPLICANT NAME FROM CODE DATA SOURCE MATRIX
     search_id = str(application_id).strip().upper()
