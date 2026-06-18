@@ -23,8 +23,6 @@ import psycopg2
 from fastapi.responses import JSONResponse
 
 
-
-
 # =========================================================
 # FASTAPI APP
 # =========================================================
@@ -50,19 +48,22 @@ applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
 print(f"✅ Applications Loaded: {len(applications_df)} rows")
 print("CSV COLUMNS:", list(applications_df.columns))
 
+# ✅ FIX: Print first and last ID so we know exact CSV range
+print(f"CSV FIRST ID: {applications_df['application_id'].iloc[0]}")
+print(f"CSV LAST ID:  {applications_df['application_id'].iloc[-1]}")
+
 # Total applications count shown in all API responses
 TOTAL_APPLICATIONS = 15000
 
 # =========================================================
 # POSTGRESQL DATABASE CONNECTION
-# ⚠️  ONLY change the password below — everything else is correct
 # =========================================================
 DB_CONFIG = {
     "host":     "dpg-d8j9bhernols73cff9t0-a",
     "port":     5432,
     "database": "creditsentinel_db_r67r",
     "user":     "creditsentinel_db_r67r_user",
-    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"   # ← paste your Render DB password here
+    "password": "u3VnrUHo8cSzQlxgxYgfYQfOVV2fsupZ"
 }
 
 def get_db_connection():
@@ -112,6 +113,34 @@ def safe_str(val, default=""):
         return default
 
 # =========================================================
+# ✅ FIX: Normalize application ID to multiple format variants
+# Handles APP-000400, APP-400, APP-0400 etc.
+# =========================================================
+def get_app_id_variants(application_id: str) -> list:
+    """Return all possible ID formats for a given application ID"""
+    variants = [application_id]  # always try exact match first
+    try:
+        parts = application_id.split("-")
+        if len(parts) == 2:
+            numeric = int(parts[1])
+            prefix  = parts[0]
+            # Add zero-padded and non-padded variants
+            variants.append(f"{prefix}-{numeric}")           # APP-400
+            variants.append(f"{prefix}-{numeric:04d}")       # APP-0400
+            variants.append(f"{prefix}-{numeric:06d}")       # APP-000400
+            variants.append(f"{prefix}-{numeric:05d}")       # APP-00400
+    except Exception:
+        pass
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    return unique
+
+# =========================================================
 # SHARED HELPERS
 # =========================================================
 def get_risk_tier(risk_score: float) -> str:
@@ -134,21 +163,6 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
 
 # =========================================================
 # CIBIL SCORE — derived from real CSV data
-#
-# Your CSV has no bureau/CIBIL column. So we calculate it
-# using the actual fields that exist: foir, monthly_income,
-# loan_to_income_ratio, num_existing_loans, employment_years.
-#
-# Formula logic (standard credit scoring approach):
-#   Base score      = 750  (average CIBIL starting point)
-#   FOIR penalty    = high debt-to-income ratio lowers score
-#   Income boost    = higher income slightly improves score
-#   LTI penalty     = high loan-to-income ratio lowers score
-#   Existing loans  = more loans = higher risk = lower score
-#   Employment      = longer employment = lower risk = higher score
-#
-# Final score is clamped to 300-900 (standard CIBIL range).
-# Every application gets a DIFFERENT score based on its real data.
 # =========================================================
 def compute_cibil_score(row) -> int:
     row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
@@ -159,69 +173,39 @@ def compute_cibil_score(row) -> int:
     num_existing_loans = safe_float(row_dict.get("num_existing_loans", 0))
     employment_years   = safe_float(row_dict.get("employment_years", 0))
 
-    score = 750.0  # base score
+    score = 750.0
 
-    # FOIR: 0-30% is healthy, above 50% is risky
-    if foir <= 30:
-        score += 40
-    elif foir <= 40:
-        score += 10
-    elif foir <= 50:
-        score -= 20
-    elif foir <= 60:
-        score -= 60
-    else:
-        score -= 100
+    if foir <= 30:      score += 40
+    elif foir <= 40:    score += 10
+    elif foir <= 50:    score -= 20
+    elif foir <= 60:    score -= 60
+    else:               score -= 100
 
-    # Monthly income: higher income = better creditworthiness
-    if monthly_income >= 100000:
-        score += 50
-    elif monthly_income >= 75000:
-        score += 35
-    elif monthly_income >= 50000:
-        score += 20
-    elif monthly_income >= 30000:
-        score += 5
-    else:
-        score -= 20
+    if monthly_income >= 100000:   score += 50
+    elif monthly_income >= 75000:  score += 35
+    elif monthly_income >= 50000:  score += 20
+    elif monthly_income >= 30000:  score += 5
+    else:                          score -= 20
 
-    # Loan-to-income ratio: lower is better
-    if loan_to_income <= 2:
-        score += 30
-    elif loan_to_income <= 4:
-        score += 10
-    elif loan_to_income <= 6:
-        score -= 20
-    else:
-        score -= 50
+    if loan_to_income <= 2:    score += 30
+    elif loan_to_income <= 4:  score += 10
+    elif loan_to_income <= 6:  score -= 20
+    else:                      score -= 50
 
-    # Number of existing loans: more = riskier
-    if num_existing_loans == 0:
-        score += 20
-    elif num_existing_loans == 1:
-        score += 5
-    elif num_existing_loans == 2:
-        score -= 15
-    else:
-        score -= 30 * (num_existing_loans - 2)
+    if num_existing_loans == 0:    score += 20
+    elif num_existing_loans == 1:  score += 5
+    elif num_existing_loans == 2:  score -= 15
+    else:                          score -= 30 * (num_existing_loans - 2)
 
-    # Employment years: stable employment = better score
-    if employment_years >= 10:
-        score += 40
-    elif employment_years >= 5:
-        score += 25
-    elif employment_years >= 3:
-        score += 10
-    elif employment_years >= 1:
-        score -= 5
-    else:
-        score -= 25
+    if employment_years >= 10:   score += 40
+    elif employment_years >= 5:  score += 25
+    elif employment_years >= 3:  score += 10
+    elif employment_years >= 1:  score -= 5
+    else:                        score -= 25
 
-    # Clamp to standard CIBIL range 300-900
     return max(300, min(900, int(score)))
 
 
-# ML-derived credit score (300-900) from risk model output
 def get_ml_credit_score(risk_score: float) -> int:
     return int(300 + (1 - risk_score) * 600)
 
@@ -240,6 +224,20 @@ def generate_risk_score(application_id: str) -> dict:
     except Exception as e:
         print(traceback.format_exc())
         return {"risk_score": 0.0, "risk_tier": "Low"}
+
+# =========================================================
+# ✅ FIX: Find a row in CSV using all ID variants
+# =========================================================
+def find_csv_row(application_id: str):
+    """Try all ID format variants to find a matching row in the CSV"""
+    variants = get_app_id_variants(application_id)
+    for variant in variants:
+        matched = applications_df[
+            applications_df["application_id"].astype(str) == variant
+        ]
+        if len(matched) > 0:
+            return matched.iloc[0], variant
+    return None, None
 
 # =========================================================
 # REQUEST MODELS
@@ -264,64 +262,56 @@ def health():
         "status":             "ok",
         "model_loaded":       True,
         "total_applications": TOTAL_APPLICATIONS,
+        "csv_rows":           len(applications_df),
+        "csv_first_id":       safe_str(applications_df["application_id"].iloc[0]),
+        "csv_last_id":        safe_str(applications_df["application_id"].iloc[-1]),
         "cibil_source":       "computed_from_foir_income_lti_loans_employment"
     }
 
 # =========================================================
 # SCORE SINGLE
 # =========================================================
-# =========================================================
-# SCORE SINGLE
-# =========================================================
 @app.post("/api/score")
 def score_application(req: ScoreRequest):
     start_time = time.time()
-
     try:
-        result = generate_risk_score(req.application_id)
+        result     = generate_risk_score(req.application_id)
         latency_ms = (time.time() - start_time) * 1000
 
-        # Log the prediction
         log_entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp":      datetime.now().isoformat(),
             "application_id": req.application_id,
-            "risk_score": result["risk_score"],
-            "risk_tier": result["risk_tier"],
-            "latency_ms": round(latency_ms, 2),
-            "status": "success"
+            "risk_score":     result["risk_score"],
+            "risk_tier":      result["risk_tier"],
+            "latency_ms":     round(latency_ms, 2),
+            "status":         "success"
         }
-
         with open("model_predictions.log", "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 
         return {
             "application_id": req.application_id,
-            "model_loaded": True,
-            "risk_score": result["risk_score"],
-            "risk_tier": result["risk_tier"],
-            "features_used": len(MODEL_FEATURES),
-            "latency_ms": round(latency_ms, 2)
+            "model_loaded":   True,
+            "risk_score":     result["risk_score"],
+            "risk_tier":      result["risk_tier"],
+            "features_used":  len(MODEL_FEATURES),
+            "latency_ms":     round(latency_ms, 2)
         }
 
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
+        log_entry  = {
+            "timestamp":      datetime.now().isoformat(),
             "application_id": req.application_id,
-            "latency_ms": round(latency_ms, 2),
-            "status": "error",
-            "error": str(e)
+            "latency_ms":     round(latency_ms, 2),
+            "status":         "error",
+            "error":          str(e)
         }
-
         with open("model_predictions.log", "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 
-        return {
-            "application_id": req.application_id,
-            "model_loaded": False,
-            "error": str(e)
-        }
+        return {"application_id": req.application_id, "model_loaded": False, "error": str(e)}
+
 # =========================================================
 # SCORE BATCH
 # =========================================================
@@ -339,70 +329,191 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
+# ✅ FIX: Read from DB first, fall back to CSV
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
     try:
+        # ✅ Try DB first — covers all 15000 applications
+        conn   = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT application_id, applicant_name, monthly_income,
+                   requested_loan_amount, application_status,
+                   existing_monthly_emi, foir, loan_to_income_ratio,
+                   num_existing_loans, employment_years
+            FROM applications
+            ORDER BY application_id
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
+
+        db_rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
         applications = []
-        subset = applications_df.iloc[offset: offset + limit]
 
-        for _, row in subset.iterrows():
-            app_id         = safe_str(row.get("application_id", ""))
-            result         = generate_risk_score(app_id)
-            risk_score     = result["risk_score"]
-            risk_tier      = result["risk_tier"]
-            monthly_income = safe_float(row.get("monthly_income", 0))
-            monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+        if db_rows:
+            for row in db_rows:
+                app_id         = safe_str(row[0])
+                result         = generate_risk_score(app_id)
+                risk_score     = result["risk_score"]
+                risk_tier      = result["risk_tier"]
+                monthly_income = safe_float(row[2])
+                monthly_emi    = safe_float(row[4] if row[4] else 0)
 
-            applications.append({
-                "application_id":     app_id,
-                "applicant_name":     safe_str(row.get("applicant_name", "")),
-                "foir":               get_foir(monthly_income, monthly_emi),
-                "monthly_income":     monthly_income,
-                "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-                "risk_score":         risk_score,
-                "risk_tier":          risk_tier,
-                "cibil_score":        compute_cibil_score(row),        # computed from real CSV data
-                "credit_score":       get_ml_credit_score(risk_score), # ML-derived 300-900
-                "application_status": get_status(risk_tier)
-            })
+                applications.append({
+                    "application_id":     app_id,
+                    "applicant_name":     safe_str(row[1]),
+                    "monthly_income":     monthly_income,
+                    "loan_amount":        safe_float(row[3]),
+                    "application_status": safe_str(row[4]),
+                    "risk_score":         risk_score,
+                    "risk_tier":          risk_tier,
+                    "foir":               get_foir(monthly_income, safe_float(row[5] if len(row) > 5 else 0)),
+                    "cibil_score":        0,   # DB rows don't have all CIBIL fields easily; compute below if needed
+                    "credit_score":       get_ml_credit_score(risk_score),
+                })
+        else:
+            # ✅ Fallback to CSV if DB applications table is empty
+            print("⚠️ DB applications table empty — falling back to CSV")
+            subset = applications_df.iloc[offset: offset + limit]
+
+            for _, row in subset.iterrows():
+                app_id         = safe_str(row.get("application_id", ""))
+                result         = generate_risk_score(app_id)
+                risk_score     = result["risk_score"]
+                risk_tier      = result["risk_tier"]
+                monthly_income = safe_float(row.get("monthly_income", 0))
+                monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+
+                applications.append({
+                    "application_id":     app_id,
+                    "applicant_name":     safe_str(row.get("applicant_name", "")),
+                    "foir":               get_foir(monthly_income, monthly_emi),
+                    "monthly_income":     monthly_income,
+                    "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
+                    "risk_score":         risk_score,
+                    "risk_tier":          risk_tier,
+                    "cibil_score":        compute_cibil_score(row),
+                    "credit_score":       get_ml_credit_score(risk_score),
+                    "application_status": get_status(risk_tier)
+                })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
 
     except Exception as e:
         print(traceback.format_exc())
-        return {"error": str(e)}
+        # ✅ Last resort: CSV fallback even if DB crashes
+        try:
+            subset       = applications_df.iloc[offset: offset + limit]
+            applications = []
+            for _, row in subset.iterrows():
+                app_id         = safe_str(row.get("application_id", ""))
+                result         = generate_risk_score(app_id)
+                risk_score     = result["risk_score"]
+                risk_tier      = result["risk_tier"]
+                monthly_income = safe_float(row.get("monthly_income", 0))
+                monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
+                applications.append({
+                    "application_id":     app_id,
+                    "applicant_name":     safe_str(row.get("applicant_name", "")),
+                    "foir":               get_foir(monthly_income, monthly_emi),
+                    "monthly_income":     monthly_income,
+                    "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
+                    "risk_score":         risk_score,
+                    "risk_tier":          risk_tier,
+                    "cibil_score":        compute_cibil_score(row),
+                    "credit_score":       get_ml_credit_score(risk_score),
+                    "application_status": get_status(risk_tier)
+                })
+            return {"total": TOTAL_APPLICATIONS, "applications": applications, "source": "csv_fallback"}
+        except Exception as e2:
+            return {"error": str(e2)}
 
 # =========================================================
 # APPLICATION DETAIL
+# ✅ FIX: Try all ID variants, search DB AND CSV
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
     try:
-        matched = applications_df[
-            applications_df["application_id"].astype(str) == str(application_id)
-        ]
-        if len(matched) == 0:
-            return {"error": "Application not found"}
+        variants = get_app_id_variants(application_id)
+        row      = None
+        matched_variant = application_id
 
-        row            = matched.iloc[0]
+        # ✅ Step 1: Try DB first for any variant
+        try:
+            conn   = get_db_connection()
+            cursor = conn.cursor()
+            for variant in variants:
+                cursor.execute("""
+                    SELECT application_id, applicant_name, monthly_income,
+                           requested_loan_amount, application_status,
+                           existing_monthly_emi, foir, loan_to_income_ratio,
+                           num_existing_loans, employment_years, application_date
+                    FROM applications
+                    WHERE application_id = %s
+                    LIMIT 1
+                """, (variant,))
+                db_row = cursor.fetchone()
+                if db_row:
+                    matched_variant = variant
+                    # Build a dict so it works like a CSV row
+                    row = {
+                        "application_id":       db_row[0],
+                        "applicant_name":       db_row[1],
+                        "monthly_income":       db_row[2],
+                        "requested_loan_amount":db_row[3],
+                        "application_status":   db_row[4],
+                        "existing_monthly_emi": db_row[5],
+                        "foir":                 db_row[6],
+                        "loan_to_income_ratio": db_row[7],
+                        "num_existing_loans":   db_row[8],
+                        "employment_years":     db_row[9],
+                        "application_date":     db_row[10],
+                    }
+                    break
+            cursor.close()
+            conn.close()
+        except Exception as db_err:
+            print(f"⚠️ DB lookup failed: {db_err}")
+
+        # ✅ Step 2: Fall back to CSV if not found in DB
+        if row is None:
+            csv_row, matched_variant = find_csv_row(application_id)
+            if csv_row is not None:
+                row = csv_row.to_dict()
+
+        # ✅ Step 3: Nothing found anywhere
+        if row is None:
+            return {
+                "error":           "Application not found",
+                "searched_for":    variants,
+                "csv_total_rows":  len(applications_df),
+                "csv_id_range":    f"{applications_df['application_id'].iloc[0]} → {applications_df['application_id'].iloc[-1]}"
+            }
+
         monthly_income = safe_float(row.get("monthly_income", 0))
         monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
         foir           = round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0
 
-        score_data   = generate_risk_score(application_id)
+        score_data   = generate_risk_score(matched_variant)
         risk_score   = score_data["risk_score"]
         risk_tier    = score_data["risk_tier"]
-        cibil_score  = compute_cibil_score(row)        # computed from real CSV data
-        credit_score = get_ml_credit_score(risk_score) # ML-derived 300-900
 
-        application_status = safe_str(row.get("application_status", row.get("status", "")))
+        # CIBIL: works for both dict and Series
+        cibil_score  = compute_cibil_score(row)
+        credit_score = get_ml_credit_score(risk_score)
+
+        application_status = safe_str(row.get("application_status", ""))
         if application_status == "":
             if risk_score >= 0.75:   application_status = "Rejected"
             elif risk_score >= 0.45: application_status = "Pending"
             else:                    application_status = "Approved"
 
-        print(f"[DETAIL] id={application_id} | cibil={cibil_score} | credit={credit_score} | risk={risk_score}")
+        print(f"[DETAIL] id={application_id} matched={matched_variant} | cibil={cibil_score} | credit={credit_score} | risk={risk_score}")
 
         return {
             "application_id":     safe_str(row.get("application_id", "")),
@@ -424,37 +535,57 @@ def get_application_detail(application_id: str):
 
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
-# Returns all past decisions for an application (newest first)
-# =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# Returns all past decisions for an application (newest first)
+# ✅ FIX: Try all ID variants + debug info returned
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
-
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn    = get_db_connection()
+        cursor  = conn.cursor()
+        variants = get_app_id_variants(application_id)
 
-        query = """
-        SELECT audit_id,
-               decision,
-               decision_notes,
-               timestamp
-        FROM audit_trail
-        WHERE application_id = %s
-        ORDER BY timestamp DESC
-        """
+        rows            = []
+        matched_variant = None
 
-        cursor.execute(query, (application_id,))
-        rows = cursor.fetchall()
+        # ✅ Try every ID format variant
+        for variant in variants:
+            cursor.execute("""
+                SELECT audit_id, decision, decision_notes, timestamp
+                FROM audit_trail
+                WHERE application_id = %s
+                ORDER BY timestamp DESC
+            """, (variant,))
+            rows = cursor.fetchall()
+            if rows:
+                matched_variant = variant
+                break
+
+        # ✅ Always include debug info so you can diagnose issues
+        cursor.execute("SELECT COUNT(*) FROM audit_trail")
+        total_records = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT DISTINCT application_id
+            FROM audit_trail
+            ORDER BY application_id
+            LIMIT 10
+        """)
+        sample_ids = [r[0] for r in cursor.fetchall()]
 
         cursor.close()
         conn.close()
 
         if not rows:
-            return {"history": []}
+            return {
+                "history": [],
+                "debug": {
+                    "searched_variants":     variants,
+                    "matched_variant":       None,
+                    "total_audit_records":   total_records,
+                    "sample_ids_in_db":      sample_ids,
+                    "tip":                   "If total_audit_records is 0, no decisions have been logged yet. Use POST /process-decision to add one."
+                }
+            }
 
         history = []
         for row in rows:
@@ -465,114 +596,111 @@ def get_decision_history(application_id: str):
                 "timestamp": row[3].isoformat() if row[3] else None
             })
 
-        return {"history": history}
-
-    except Exception as e:
         return {
-            "error": str(e)
+            "history":        history,
+            "matched_variant": matched_variant
         }
 
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # =========================================================
-# AUDIT TRAIL — POST /api/applications/{id}/decision
-# Log a lending decision (APPROVE / REJECT / REVIEW)
-# Called by Jaajitha's frontend APPROVE/REJECT/REVIEW button
+# AUDIT TRAIL — POST /api/applications/{id}/process-decision
+# ✅ FIX: Normalize ID before inserting into DB
 # =========================================================
-
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
     valid_decisions = ["APPROVE", "REJECT", "REVIEW"]
 
     if req.decision.upper() not in valid_decisions:
-        return {"error": "Invalid decision"}
+        return {"error": "Invalid decision. Must be one of: APPROVE, REJECT, REVIEW"}
 
-    notes = req.notes or ""
+    notes    = req.notes or ""
+    variants = get_app_id_variants(application_id)
 
     try:
-        conn = get_db_connection()
+        conn   = get_db_connection()
         cursor = conn.cursor()
+
+        # ✅ Find which ID variant exists in the applications table
+        stored_id = application_id  # default to what was passed in
+        for variant in variants:
+            cursor.execute(
+                "SELECT application_id FROM applications WHERE application_id = %s LIMIT 1",
+                (variant,)
+            )
+            found = cursor.fetchone()
+            if found:
+                stored_id = found[0]
+                break
 
         # APPROVE
         if req.decision.upper() == "APPROVE":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'approved',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE application_id = %s
-            """, (application_id,))
-
-            print(f"EMAIL: Loan approved for {application_id}")
+            """, (stored_id,))
+            print(f"EMAIL: Loan approved for {stored_id}")
 
         # REJECT
         elif req.decision.upper() == "REJECT":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'rejected',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE application_id = %s
-            """, (application_id,))
-
-            print(f"EMAIL: Loan rejected for {application_id}")
+            """, (stored_id,))
+            print(f"EMAIL: Loan rejected for {stored_id}")
 
         # REVIEW
         elif req.decision.upper() == "REVIEW":
-
             cursor.execute("""
                 UPDATE applications
                 SET application_status = 'under_review',
                     assigned_reviewer = 'TEAM_LEAD',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE application_id = %s
-            """, (application_id,))
+            """, (stored_id,))
+            print(f"NOTIFY TEAM LEAD: {stored_id}")
 
-            print(f"NOTIFY TEAM LEAD: {application_id}")
-
-
-        # Audit Log
+        # ✅ Audit Log — always use the canonical stored_id
         cursor.execute("""
             INSERT INTO audit_trail
             (application_id, decision, decision_notes, timestamp)
             VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
-        """, (
-            application_id,
-            req.decision.upper(),
-            notes
-        ))
+        """, (stored_id, req.decision.upper(), notes))
 
         audit_id = cursor.fetchone()[0]
-
         conn.commit()
-
         cursor.close()
         conn.close()
 
         return {
-            "audit_id": audit_id,
-            "status": req.decision.lower(),
-            "message": "Decision processed successfully"
+            "audit_id":        audit_id,
+            "application_id":  stored_id,
+            "status":          req.decision.lower(),
+            "message":         "Decision processed successfully"
         }
 
     except Exception as e:
-
-        conn.rollback()
-
+        try:
+            conn.rollback()
+        except:
+            pass
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "failed",
-                "error": str(e)
-            }
+            content={"status": "failed", "error": str(e)}
         )
 
 
 # =========================================================
-# AUDIT TRAIL — GET /api/applications/"/api/portfolio/summary"
-# Returns all past decisions for an application (newest first)
+# PORTFOLIO SUMMARY
+# =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
@@ -587,45 +715,33 @@ def portfolio_summary():
         monthly_income     = get_col("monthly_income")
         num_existing_loans = get_col("num_existing_loans")
         employment_years   = get_col("employment_years")
+        foir               = get_col("foir")
+        loan_to_income     = get_col("loan_to_income_ratio")
 
-        # Use foir and loan_to_income_ratio directly from CSV (they exist as columns)
-        foir           = get_col("foir")
-        loan_to_income = get_col("loan_to_income_ratio")
-
-        # Vectorized CIBIL score — mirrors compute_cibil_score() exactly, no loop
         score = pd.Series(750.0, index=df.index)
 
-        # FOIR
         score += np.select(
             [foir <= 30, foir <= 40, foir <= 50, foir <= 60],
             [40, 10, -20, -60],
             default=-100
         )
-
-        # Monthly income
         score += np.select(
             [monthly_income >= 100000, monthly_income >= 75000,
              monthly_income >= 50000,  monthly_income >= 30000],
             [50, 35, 20, 5],
             default=-20
         )
-
-        # Loan-to-income
         score += np.select(
             [loan_to_income <= 2, loan_to_income <= 4, loan_to_income <= 6],
             [30, 10, -20],
             default=-50
         )
-
-        # Existing loans
         extra_penalty = np.where(num_existing_loans > 2, -30 * (num_existing_loans - 2), 0)
         score += np.select(
             [num_existing_loans == 0, num_existing_loans == 1, num_existing_loans == 2],
             [20, 5, -15],
             default=extra_penalty
         )
-
-        # Employment years
         score += np.select(
             [employment_years >= 10, employment_years >= 5,
              employment_years >= 3,  employment_years >= 1],
@@ -633,9 +749,7 @@ def portfolio_summary():
             default=-25
         )
 
-        # Clamp to 300–900
-        score = score.clip(300, 900).astype(int)
-
+        score  = score.clip(300, 900).astype(int)
         low    = int((score >= 750).sum())
         medium = int(((score >= 650) & (score < 750)).sum())
         high   = int((score < 650).sum())
@@ -644,17 +758,19 @@ def portfolio_summary():
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
 
         return {
-            "total_applications": TOTAL_APPLICATIONS,
-            "high":   high,
-            "medium": medium,
-            "low":    low,
-            "execution_time_seconds": elapsed
+            "total_applications":      TOTAL_APPLICATIONS,
+            "high":                    high,
+            "medium":                  medium,
+            "low":                     low,
+            "execution_time_seconds":  elapsed
         }
 
     except Exception as e:
         err = traceback.format_exc()
         print("PORTFOLIO ERROR:", err)
         return {"error": str(e), "detail": err}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
