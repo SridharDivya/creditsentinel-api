@@ -68,14 +68,16 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
+
 db_pool = pool.SimpleConnectionPool(
     minconn=1,
     maxconn=30,
     host=DB_CONFIG["host"],
-    port=DB_CONFIG["port"],
+    port=int(DB_CONFIG["port"]),
     database=DB_CONFIG["database"],
     user=DB_CONFIG["user"],
-    password=DB_CONFIG["password"]
+    password=DB_CONFIG["password"],
+    sslmode="require"
 )
 
 print("✅ Connection Pool Initialized")
