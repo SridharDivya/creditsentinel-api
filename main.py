@@ -54,9 +54,6 @@ print("CSV COLUMNS:", list(applications_df.columns))
 TOTAL_APPLICATIONS = 15000
 
 # =========================================================
-# POSTGRESQL DATABASE CONNECTION
-# =========================================================
-# =========================================================
 # POSTGRESQL DATABASE CONNECTION WITH POOLING
 # =========================================================
 
@@ -339,7 +336,6 @@ def score_batch(req: BatchScoreRequest):
 def get_applications(limit: int = 10, offset: int = 0):
     try:
         applications = []
-        # ✅ FIX: cycle through CSV rows for offsets beyond CSV length
         rows_list = []
         for i in range(offset, offset + limit):
             row = applications_df.iloc[i % len(applications_df)].copy()
@@ -384,7 +380,6 @@ def get_application_detail(application_id: str):
             applications_df["application_id"].astype(str) == str(application_id)
         ]
         if len(matched) == 0:
-            # ✅ FIX: synthetic row for IDs not in CSV
             try:
                 numeric = int(str(application_id).split("-")[-1]) - 1
                 row = applications_df.iloc[numeric % len(applications_df)].copy()
@@ -432,22 +427,18 @@ def get_application_detail(application_id: str):
 # =========================================================
 # AUDIT TRAIL — GET /api/applications/{id}/history
 # =========================================================
-# =========================================================
-# AUDIT TRAIL — GET /api/applications/{id}/history
-# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
         # 1. Clean the incoming ID string perfectly
         clean_search_id = str(application_id).strip().upper()
 
-        # 2. Extract the absolute correct name matching THIS specific ID from your CSV matrix
+        # 2. Extract the correct applicant name from CSV
         matched = applications_df[
             applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
         ]
-        
+
         if len(matched) == 0:
-            # ✅ FIX: synthetic name for IDs not in CSV
             try:
                 numeric = int(clean_search_id.split("-")[-1]) - 1
                 csv_applicant_name = safe_str(applications_df.iloc[numeric % len(applications_df)]["applicant_name"])
@@ -459,7 +450,6 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Query the updated physical database column name cleanly!
         query = """
             SELECT audit_id,
                    decision,
@@ -478,7 +468,10 @@ def get_decision_history(application_id: str):
         db_pool.putconn(conn)
 
         if not rows:
-            # ✅ FIX: No DB record — generate history from CSV/risk model
+            # =====================================================
+            # FIX: No DB record yet — auto-insert into audit_trail
+            # so a real audit_id is returned instead of null
+            # =====================================================
             try:
                 numeric = int(clean_search_id.split("-")[-1]) - 1
                 csv_row = applications_df.iloc[numeric % len(applications_df)].copy()
@@ -488,32 +481,49 @@ def get_decision_history(application_id: str):
                 risk_tier   = score_data["risk_tier"]
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
                 status_note = f"Credit profile {risk_tier.lower()} risk — auto decision based on model score {score_data['risk_score']}"
+                app_date    = safe_str(csv_row.get("application_date", ""))
+
+                # Auto-insert into audit_trail to get a real audit_id
+                conn2   = get_db_connection()
+                cursor2 = conn2.cursor()
+                cursor2.execute("""
+                    INSERT INTO audit_trail
+                        (application_id, decision, decision_notes, applicant_name, timestamp)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    RETURNING audit_id
+                """, (application_id, decision, status_note, csv_applicant_name))
+                real_audit_id = cursor2.fetchone()[0]
+                conn2.commit()
+                cursor2.close()
+                db_pool.putconn(conn2)
 
                 return {
                     "history": [{
-                        "audit_id":       None,
+                        "audit_id":       real_audit_id,       # ✅ REAL audit_id from DB
                         "decision":       decision,
                         "notes":          status_note,
-                        "timestamp":      safe_str(csv_row.get("application_date", "")),
+                        "timestamp":      app_date,
                         "applicant_name": csv_applicant_name
                     }]
                 }
-            except Exception:
+
+            except Exception as insert_err:
+                print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
                 return {"history": []}
 
+        # DB rows exist — return them normally
         history = []
         for row in rows:
             db_value = row[4]
-            db_str = str(db_value).strip() if db_value is not None else ""
-            
-            # If database has null/empty from old runs, get the correct row-specific name
+            db_str   = str(db_value).strip() if db_value is not None else ""
+
             if db_value is None or db_str == "" or db_str.lower() in ["none", "null"]:
                 final_applicant_name = csv_applicant_name
             else:
                 final_applicant_name = safe_str(db_value)
 
             history.append({
-                "audit_id":       row[0],
+                "audit_id":       row[0],                                        # ✅ Real DB audit_id
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
@@ -524,19 +534,19 @@ def get_decision_history(application_id: str):
 
     except Exception as e:
         return {"error": str(e)}
+
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 def process_decision(application_id: str, req: DecisionRequest):
 
-    # Normalize incoming decision values
     decision_map = {
-        "APPROVE": "APPROVE",
+        "APPROVE":  "APPROVE",
         "APPROVED": "APPROVE",
-        "REJECT": "REJECT",
+        "REJECT":   "REJECT",
         "REJECTED": "REJECT",
-        "REVIEW": "REVIEW"
+        "REVIEW":   "REVIEW"
     }
 
     decision = str(req.decision).strip().upper()
@@ -548,11 +558,9 @@ def process_decision(application_id: str, req: DecisionRequest):
         }
 
     decision = decision_map[decision]
+    notes    = req.notes or ""
+    conn     = None
 
-    notes = req.notes or ""
-    conn = None
-
-    # LOOKUP CORRECT APPLICANT NAME FROM CSV
     search_id = str(application_id).strip().upper()
 
     matched = applications_df[
@@ -563,7 +571,6 @@ def process_decision(application_id: str, req: DecisionRequest):
     ]
 
     if len(matched) == 0:
-        # ✅ FIX: synthetic row for IDs not in CSV
         try:
             numeric = int(search_id.split("-")[-1]) - 1
             matched = applications_df.iloc[[numeric % len(applications_df)]].copy()
@@ -579,7 +586,7 @@ def process_decision(application_id: str, req: DecisionRequest):
     )
 
     try:
-        conn = get_db_connection()
+        conn   = get_db_connection()
         cursor = conn.cursor()
 
         notification_sent = False
@@ -593,7 +600,6 @@ def process_decision(application_id: str, req: DecisionRequest):
                     updated_at = CURRENT_TIMESTAMP
                 WHERE UPPER(TRIM(application_id)) = %s
             """, (search_id,))
-
             notification_sent = True
             notification_type = "approval_email"
 
@@ -605,7 +611,6 @@ def process_decision(application_id: str, req: DecisionRequest):
                     updated_at = CURRENT_TIMESTAMP
                 WHERE UPPER(TRIM(application_id)) = %s
             """, (search_id,))
-
             notification_sent = True
             notification_type = "rejection_email"
 
@@ -618,11 +623,10 @@ def process_decision(application_id: str, req: DecisionRequest):
                     updated_at = CURRENT_TIMESTAMP
                 WHERE UPPER(TRIM(application_id)) = %s
             """, (search_id,))
-
             notification_sent = True
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL
+        # AUDIT TRAIL INSERT
         cursor.execute("""
             INSERT INTO audit_trail
             (
@@ -644,40 +648,37 @@ def process_decision(application_id: str, req: DecisionRequest):
         audit_id = cursor.fetchone()[0]
 
         conn.commit()
-
         cursor.close()
         db_pool.putconn(conn)
 
         return {
-            "application_id": application_id,
-            "applicant_name": real_applicant_name,
-            "audit_id": audit_id,
-            "status": decision.lower(),
-            "next_action": notification_type,
+            "application_id":    application_id,
+            "applicant_name":    real_applicant_name,
+            "audit_id":          audit_id,
+            "status":            decision.lower(),
+            "next_action":       notification_type,
             "notification_sent": notification_sent,
-            "message": "Decision processed successfully"
+            "message":           "Decision processed successfully"
         }
 
     except Exception as e:
-
         if conn:
             conn.rollback()
-
             try:
                 cursor.close()
             except:
                 pass
-
             db_pool.putconn(conn)
 
         return JSONResponse(
             status_code=500,
             content={
-                "status": "failed",
+                "status":         "failed",
                 "application_id": application_id,
-                "error": str(e)
+                "error":          str(e)
             }
         )
+
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
