@@ -224,17 +224,86 @@ def get_ml_credit_score(risk_score: float) -> int:
 # CORE: RUN ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
+    """
+    Week 7 Day 2 - Decision Latency Analysis
+    Measures:
+    1. Feature Computation Time
+    2. Model Inference Time
+    3. Total Scoring Time
+    """
+
     try:
-        features_dict     = compute_features(application_id)
-        filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
-        features_df       = pd.DataFrame([filtered_features])[MODEL_FEATURES]
-        features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
-        risk_score = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
-        risk_tier  = get_risk_tier(risk_score)
-        return {"risk_score": risk_score, "risk_tier": risk_tier}
-    except Exception as e:
+        total_start = time.time()
+
+        # =========================================================
+        # FEATURE COMPUTATION
+        # =========================================================
+        feature_start = time.time()
+
+        features_dict = compute_features(application_id)
+
+        feature_time = time.time() - feature_start
+
+        # =========================================================
+        # MODEL INFERENCE
+        # =========================================================
+        model_start = time.time()
+
+        filtered_features = {
+            feature: features_dict.get(feature, 0)
+            for feature in MODEL_FEATURES
+        }
+
+        features_df = pd.DataFrame([filtered_features])[MODEL_FEATURES]
+
+        features_df = (
+            features_df
+            .fillna(0)
+            .replace([np.inf, -np.inf], 0)
+            .astype(float)
+        )
+
+        risk_score = round(
+            float(model.predict_proba(features_df)[:, 1][0]),
+            4
+        )
+
+        model_time = time.time() - model_start
+
+        # =========================================================
+        # TOTAL LATENCY
+        # =========================================================
+        total_time = time.time() - total_start
+
+        risk_tier = get_risk_tier(risk_score)
+
+        print("\n")
+        print("=" * 70)
+        print("CREDIT SENTINEL - LATENCY BREAKDOWN")
+        print("=" * 70)
+        print(f"Application ID      : {application_id}")
+        print(f"Feature Computation : {feature_time:.4f} sec")
+        print(f"Model Inference     : {model_time:.4f} sec")
+        print(f"Total Scoring Time  : {total_time:.4f} sec")
+        print("=" * 70)
+        print("\n")
+
+        return {
+            "risk_score": risk_score,
+            "risk_tier": risk_tier,
+            "feature_time": round(feature_time, 4),
+            "model_time": round(model_time, 4),
+            "total_time": round(total_time, 4)
+        }
+
+    except Exception:
         print(traceback.format_exc())
-        return {"risk_score": 0.0, "risk_tier": "Low"}
+
+        return {
+            "risk_score": 0.0,
+            "risk_tier": "Low"
+        }
+    
 
 # =========================================================
 # REQUEST MODELS
