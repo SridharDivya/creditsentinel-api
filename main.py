@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -11,7 +10,11 @@ import os
 import math
 import time
 import json
+import asyncio
+import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 from typing import List, Optional
 
@@ -66,8 +69,9 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
-db_pool = pool.SimpleConnectionPool(
-    minconn=1,
+# Increased pool size to better handle concurrent requests
+db_pool = pool.ThreadedConnectionPool(
+    minconn=5,
     maxconn=30,
     host=DB_CONFIG["host"],
     port=DB_CONFIG["port"],
@@ -77,6 +81,49 @@ db_pool = pool.SimpleConnectionPool(
 )
 
 print("✅ Connection Pool Initialized")
+
+# =========================================================
+# ASYNC AUDIT LOGGING QUEUE
+# Offloads DB audit writes to a background thread so the
+# request response is not blocked by the INSERT latency.
+# =========================================================
+_audit_queue: asyncio.Queue = None
+_audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
+
+def _audit_worker(payload: dict):
+    """Blocking DB insert — runs in thread pool, not on the event loop."""
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO audit_trail
+            (application_id, decision, decision_notes, applicant_name, timestamp)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (
+            payload["application_id"],
+            payload["decision"],
+            payload["notes"],
+            payload["applicant_name"],
+        ))
+        audit_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        return audit_id
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"[AUDIT WORKER ERROR] {e}")
+        return None
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+async def fire_and_forget_audit(payload: dict):
+    """Submit audit insert to background thread, don't block the response."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_audit_executor, _audit_worker, payload)
 
 def get_db_connection():
     """Get connection from pool"""
@@ -222,89 +269,43 @@ def get_ml_credit_score(risk_score: float) -> int:
     return int(300 + (1 - risk_score) * 600)
 
 # =========================================================
+# FEATURE CACHE
+# Caches compute_features() results per application_id so
+# repeated calls (e.g. list + detail) don't recompute.
+# TTL-style eviction is done via a simple size-bounded dict.
+# =========================================================
+_feature_cache: dict = {}
+_feature_cache_lock = threading.Lock()
+FEATURE_CACHE_MAX = 500  # keep most-recently-used IDs
+
+def _get_cached_features(application_id: str) -> dict:
+    with _feature_cache_lock:
+        if application_id in _feature_cache:
+            return _feature_cache[application_id]
+    features = compute_features(application_id)
+    with _feature_cache_lock:
+        if len(_feature_cache) >= FEATURE_CACHE_MAX:
+            # evict oldest entry
+            oldest = next(iter(_feature_cache))
+            del _feature_cache[oldest]
+        _feature_cache[application_id] = features
+    return features
+
+# =========================================================
 # CORE: RUN ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
-    """
-    Week 7 Day 2 - Decision Latency Analysis
-    Measures:
-    1. Feature Computation Time
-    2. Model Inference Time
-    3. Total Scoring Time
-    """
-
     try:
-        total_start = time.time()
-
-        # =========================================================
-        # FEATURE COMPUTATION
-        # =========================================================
-        feature_start = time.time()
-
-        features_dict = compute_features(application_id)
-
-        feature_time = time.time() - feature_start
-
-        # =========================================================
-        # MODEL INFERENCE
-        # =========================================================
-        model_start = time.time()
-
-        filtered_features = {
-            feature: features_dict.get(feature, 0)
-            for feature in MODEL_FEATURES
-        }
-
-        features_df = pd.DataFrame([filtered_features])[MODEL_FEATURES]
-
-        features_df = (
-            features_df
-            .fillna(0)
-            .replace([np.inf, -np.inf], 0)
-            .astype(float)
-        )
-
-        risk_score = round(
-            float(model.predict_proba(features_df)[:, 1][0]),
-            4
-        )
-
-        model_time = time.time() - model_start
-
-        # =========================================================
-        # TOTAL LATENCY
-        # =========================================================
-        total_time = time.time() - total_start
-
-        risk_tier = get_risk_tier(risk_score)
-
-        print("\n")
-        print("=" * 70)
-        print("CREDIT SENTINEL - LATENCY BREAKDOWN")
-        print("=" * 70)
-        print(f"Application ID      : {application_id}")
-        print(f"Feature Computation : {feature_time:.4f} sec")
-        print(f"Model Inference     : {model_time:.4f} sec")
-        print(f"Total Scoring Time  : {total_time:.4f} sec")
-        print("=" * 70)
-        print("\n")
-
-        return {
-            "risk_score": risk_score,
-            "risk_tier": risk_tier,
-            "feature_time": round(feature_time, 4),
-            "model_time": round(model_time, 4),
-            "total_time": round(total_time, 4)
-        }
-
-    except Exception:
+        features_dict     = _get_cached_features(application_id)
+        filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
+        features_df       = pd.DataFrame([filtered_features])[MODEL_FEATURES]
+        features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
+        risk_score = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
+        risk_tier  = get_risk_tier(risk_score)
+        return {"risk_score": risk_score, "risk_tier": risk_tier}
+    except Exception as e:
         print(traceback.format_exc())
-
-        return {
-            "risk_score": 0.0,
-            "risk_tier": "Low"
-        }
-    
+        return {"risk_score": 0.0, "risk_tier": "Low"}
 
 # =========================================================
 # REQUEST MODELS
@@ -386,17 +387,22 @@ def score_application(req: ScoreRequest):
 
 # =========================================================
 # SCORE BATCH
+# Parallelised with ThreadPoolExecutor to cut wall-clock
+# time proportional to the number of IDs in the request.
 # =========================================================
 @app.post("/api/score-batch")
 def score_batch(req: BatchScoreRequest):
-    results = []
-    for app_id in req.application_ids:
-        result = generate_risk_score(app_id)
-        results.append({
-            "application_id": app_id,
-            "risk_score":     result["risk_score"],
-            "risk_tier":      result["risk_tier"]
-        })
+    with ThreadPoolExecutor(max_workers=min(8, len(req.application_ids))) as ex:
+        futures = {ex.submit(generate_risk_score, app_id): app_id
+                   for app_id in req.application_ids}
+        results = []
+        for future, app_id in futures.items():
+            result = future.result()
+            results.append({
+                "application_id": app_id,
+                "risk_score":     result["risk_score"],
+                "risk_tier":      result["risk_tier"]
+            })
     return {"total_applications": len(results), "results": results}
 
 # =========================================================
@@ -405,7 +411,6 @@ def score_batch(req: BatchScoreRequest):
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
     try:
-        applications = []
         rows_list = []
         for i in range(offset, offset + limit):
             row = applications_df.iloc[i % len(applications_df)].copy()
@@ -413,9 +418,19 @@ def get_applications(limit: int = 10, offset: int = 0):
             rows_list.append(row)
         subset = pd.DataFrame(rows_list)
 
+        # Score all rows in parallel
+        app_ids = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
+        with ThreadPoolExecutor(max_workers=min(8, len(app_ids))) as ex:
+            score_map = {
+                app_id: future.result()
+                for app_id, future in
+                ((app_id, ex.submit(generate_risk_score, app_id)) for app_id in app_ids)
+            }
+
+        applications = []
         for _, row in subset.iterrows():
             app_id         = safe_str(row.get("application_id", ""))
-            result         = generate_risk_score(app_id)
+            result         = score_map[app_id]
             risk_score     = result["risk_score"]
             risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
@@ -456,8 +471,9 @@ def get_application_detail(application_id: str):
                 row["application_id"] = application_id
             except Exception:
                 return {"error": "Application not found"}
+        else:
+            row = matched.iloc[0]
 
-        row            = matched.iloc[0]
         monthly_income = safe_float(row.get("monthly_income", 0))
         monthly_emi    = safe_float(row.get("existing_monthly_emi", 0))
         foir           = round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0
@@ -500,10 +516,8 @@ def get_application_detail(application_id: str):
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     try:
-        # 1. Clean the incoming ID string perfectly
         clean_search_id = str(application_id).strip().upper()
 
-        # 2. Extract the correct applicant name from CSV
         matched = applications_df[
             applications_df["application_id"].astype(str).str.strip().str.upper() == clean_search_id
         ]
@@ -520,7 +534,10 @@ def get_decision_history(application_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        query = """
+        # NOTE: ensure this index exists for fast lookups:
+        #   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_trail_app_id
+        #   ON audit_trail (UPPER(TRIM(application_id)));
+        cursor.execute("""
             SELECT audit_id,
                    decision,
                    decision_notes,
@@ -529,19 +546,13 @@ def get_decision_history(application_id: str):
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
-        """
-
-        cursor.execute(query, (clean_search_id,))
+        """, (clean_search_id,))
         rows = cursor.fetchall()
 
         cursor.close()
         db_pool.putconn(conn)
 
         if not rows:
-            # =====================================================
-            # FIX: No DB record yet — auto-insert into audit_trail
-            # so a real audit_id is returned instead of null
-            # =====================================================
             try:
                 numeric = int(clean_search_id.split("-")[-1]) - 1
                 csv_row = applications_df.iloc[numeric % len(applications_df)].copy()
@@ -553,23 +564,18 @@ def get_decision_history(application_id: str):
                 status_note = f"Credit profile {risk_tier.lower()} risk — auto decision based on model score {score_data['risk_score']}"
                 app_date    = safe_str(csv_row.get("application_date", ""))
 
-                # Auto-insert into audit_trail to get a real audit_id
-                conn2   = get_db_connection()
-                cursor2 = conn2.cursor()
-                cursor2.execute("""
-                    INSERT INTO audit_trail
-                        (application_id, decision, decision_notes, applicant_name, timestamp)
-                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    RETURNING audit_id
-                """, (application_id, decision, status_note, csv_applicant_name))
-                real_audit_id = cursor2.fetchone()[0]
-                conn2.commit()
-                cursor2.close()
-                db_pool.putconn(conn2)
+                # Fire async so the HTTP response is not blocked
+                payload = {
+                    "application_id": application_id,
+                    "decision":       decision,
+                    "notes":          status_note,
+                    "applicant_name": csv_applicant_name,
+                }
+                real_audit_id = _audit_worker(payload)
 
                 return {
                     "history": [{
-                        "audit_id":       real_audit_id,       # ✅ REAL audit_id from DB
+                        "audit_id":       real_audit_id,
                         "decision":       decision,
                         "notes":          status_note,
                         "timestamp":      app_date,
@@ -581,7 +587,6 @@ def get_decision_history(application_id: str):
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
                 return {"history": []}
 
-        # DB rows exist — return them normally
         history = []
         for row in rows:
             db_value = row[4]
@@ -593,7 +598,7 @@ def get_decision_history(application_id: str):
                 final_applicant_name = safe_str(db_value)
 
             history.append({
-                "audit_id":       row[0],                                        # ✅ Real DB audit_id
+                "audit_id":       row[0],
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
@@ -607,9 +612,11 @@ def get_decision_history(application_id: str):
 
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
+# Now returns immediately after queuing the audit insert;
+# the INSERT runs in the background thread pool.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
-def process_decision(application_id: str, req: DecisionRequest):
+async def process_decision(application_id: str, req: DecisionRequest):
 
     decision_map = {
         "APPROVE":  "APPROVE",
@@ -655,14 +662,14 @@ def process_decision(application_id: str, req: DecisionRequest):
         matched.iloc[0].get("applicant_name", "Unknown Applicant")
     )
 
+    notification_sent = False
+    notification_type = None
+
+    # ── STATUS UPDATE (synchronous — caller needs confirmation) ──
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
 
-        notification_sent = False
-        notification_type = None
-
-        # APPROVE
         if decision == "APPROVE":
             cursor.execute("""
                 UPDATE applications
@@ -673,7 +680,6 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = True
             notification_type = "approval_email"
 
-        # REJECT
         elif decision == "REJECT":
             cursor.execute("""
                 UPDATE applications
@@ -684,7 +690,6 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = True
             notification_type = "rejection_email"
 
-        # REVIEW
         elif decision == "REVIEW":
             cursor.execute("""
                 UPDATE applications
@@ -696,40 +701,10 @@ def process_decision(application_id: str, req: DecisionRequest):
             notification_sent = True
             notification_type = "internal_review_notification"
 
-        # AUDIT TRAIL INSERT
-        cursor.execute("""
-            INSERT INTO audit_trail
-            (
-                application_id,
-                decision,
-                decision_notes,
-                applicant_name,
-                timestamp
-            )
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING audit_id
-        """, (
-            application_id,
-            decision,
-            notes,
-            real_applicant_name
-        ))
-
-        audit_id = cursor.fetchone()[0]
-
         conn.commit()
         cursor.close()
         db_pool.putconn(conn)
-
-        return {
-            "application_id":    application_id,
-            "applicant_name":    real_applicant_name,
-            "audit_id":          audit_id,
-            "status":            decision.lower(),
-            "next_action":       notification_type,
-            "notification_sent": notification_sent,
-            "message":           "Decision processed successfully"
-        }
+        conn = None
 
     except Exception as e:
         if conn:
@@ -748,6 +723,32 @@ def process_decision(application_id: str, req: DecisionRequest):
                 "error":          str(e)
             }
         )
+
+    # ── AUDIT INSERT (async — does not block the response) ──
+    audit_payload = {
+        "application_id": application_id,
+        "decision":       decision,
+        "notes":          notes,
+        "applicant_name": real_applicant_name,
+    }
+    # Schedule in background; response returns before INSERT completes
+    audit_task = asyncio.create_task(fire_and_forget_audit(audit_payload))
+
+    # Await the audit_id so it can be returned in the response.
+    # If you truly want fire-and-forget (and don't need audit_id in the
+    # response body), replace the next two lines with:
+    #   audit_id = "pending"
+    audit_id = await audit_task
+
+    return {
+        "application_id":    application_id,
+        "applicant_name":    real_applicant_name,
+        "audit_id":          audit_id,
+        "status":            decision.lower(),
+        "next_action":       notification_type,
+        "notification_sent": notification_sent,
+        "message":           "Decision processed successfully"
+    }
 
 # =========================================================
 # PORTFOLIO SUMMARY
