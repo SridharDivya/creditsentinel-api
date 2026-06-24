@@ -512,4 +512,158 @@ def get_decision_history(application_id: str):
                 f"Credit profile {risk_tier.lower()} risk — "
                 f"auto decision based on model score {score_data['risk_score']}"
             )
-            app_date = safe_str(row.get("application_date", "")) if row is not None e
+            app_date = safe_str(row.get("application_date", "")) if row is not None else ""
+
+            # fire-and-forget
+            _dispatch_audit({"application_id": application_id, "decision": decision,
+                              "notes": status_note, "applicant_name": csv_name})
+            return {"history": [{
+                "audit_id":       "queued",
+                "decision":       decision,
+                "notes":          status_note,
+                "timestamp":      app_date,
+                "applicant_name": csv_name,
+            }]}
+
+        history = []
+        for r in rows:
+            db_val = r[4]
+            db_str = str(db_val).strip() if db_val is not None else ""
+            name   = csv_name if (not db_val or db_str.lower() in ["", "none", "null"]) else safe_str(db_val)
+            history.append({
+                "audit_id":       r[0],
+                "decision":       r[1],
+                "notes":          r[2],
+                "timestamp":      r[3].isoformat() if r[3] else None,
+                "applicant_name": name,
+            })
+        return {"history": history}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+# =========================================================
+# PROCESS DECISION
+# UPDATE is synchronous. Audit INSERT is fire-and-forget.
+# Response returns the instant UPDATE commits (~5-10ms).
+# =========================================================
+@app.post("/api/applications/{application_id}/process-decision")
+def process_decision(application_id: str, req: DecisionRequest):
+    decision_map = {
+        "APPROVE": "APPROVE", "APPROVED": "APPROVE",
+        "REJECT":  "REJECT",  "REJECTED": "REJECT",
+        "REVIEW":  "REVIEW",
+    }
+    decision = str(req.decision).strip().upper()
+    if decision not in decision_map:
+        return {"status": "failed",
+                "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
+    decision  = decision_map[decision]
+    notes     = req.notes or ""
+    search_id = str(application_id).strip().upper()
+
+    row, _ = _lookup_row(application_id)
+    if row is None:
+        return JSONResponse(status_code=404,
+                            content={"status": "failed",
+                                     "error": f"Application {application_id} not found"})
+
+    applicant_name = safe_str(row.get("applicant_name", "Unknown Applicant"))
+
+    status_sql = {
+        "APPROVE": "SET application_status='approved', updated_at=CURRENT_TIMESTAMP",
+        "REJECT":  "SET application_status='rejected', updated_at=CURRENT_TIMESTAMP",
+        "REVIEW":  "SET application_status='under_review', assigned_reviewer='TEAM_LEAD', updated_at=CURRENT_TIMESTAMP",
+    }
+    notification_map = {
+        "APPROVE": "approval_email",
+        "REJECT":  "rejection_email",
+        "REVIEW":  "internal_review_notification",
+    }
+
+    conn = None
+    try:
+        conn   = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE applications {status_sql[decision]} WHERE UPPER(TRIM(application_id))=%s",
+            (search_id,)
+        )
+        conn.commit()
+        cursor.close()
+        db_pool.putconn(conn)
+        conn = None
+    except Exception as e:
+        if conn:
+            conn.rollback()
+            try: cursor.close()
+            except: pass
+            db_pool.putconn(conn)
+        return JSONResponse(status_code=500,
+                            content={"status": "failed",
+                                     "application_id": application_id, "error": str(e)})
+
+    _dispatch_audit({"application_id": application_id, "decision": decision,
+                     "notes": notes, "applicant_name": applicant_name})
+
+    return {
+        "application_id":    application_id,
+        "applicant_name":    applicant_name,
+        "audit_id":          "queued",
+        "status":            decision.lower(),
+        "next_action":       notification_map[decision],
+        "notification_sent": True,
+        "message":           "Decision processed successfully",
+    }
+
+# =========================================================
+# PORTFOLIO SUMMARY  — vectorised numpy, no per-row loops
+# =========================================================
+@app.get("/api/portfolio/summary")
+def portfolio_summary():
+    start = time.time()
+    try:
+        df = applications_df
+
+        def get_col(name):
+            return pd.to_numeric(df[name], errors="coerce").fillna(0) if name in df.columns \
+                   else pd.Series(0.0, index=df.index)
+
+        monthly_income     = get_col("monthly_income")
+        num_existing_loans = get_col("num_existing_loans")
+        employment_years   = get_col("employment_years")
+        foir               = get_col("foir")
+        loan_to_income     = get_col("loan_to_income_ratio")
+
+        score = pd.Series(750.0, index=df.index)
+        score += np.select([foir<=30,foir<=40,foir<=50,foir<=60],[40,10,-20,-60],default=-100)
+        score += np.select([monthly_income>=100000,monthly_income>=75000,
+                            monthly_income>=50000,monthly_income>=30000],[50,35,20,5],default=-20)
+        score += np.select([loan_to_income<=2,loan_to_income<=4,loan_to_income<=6],[30,10,-20],default=-50)
+        extra  = np.where(num_existing_loans>2,-30*(num_existing_loans-2),0)
+        score += np.select([num_existing_loans==0,num_existing_loans==1,
+                            num_existing_loans==2],[20,5,-15],default=extra)
+        score += np.select([employment_years>=10,employment_years>=5,
+                            employment_years>=3,employment_years>=1],[40,25,10,-5],default=-25)
+        score  = score.clip(300,900).astype(int)
+
+        low    = int((score >= 750).sum())
+        medium = int(((score >= 650) & (score < 750)).sum())
+        high   = int((score < 650).sum())
+        elapsed = round(time.time() - start, 2)
+        print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
+        return {
+            "total_applications":     TOTAL_APPLICATIONS,
+            "high": high, "medium": medium, "low": low,
+            "execution_time_seconds": elapsed,
+        }
+    except Exception as e:
+        err = traceback.format_exc()
+        print("PORTFOLIO ERROR:", err)
+        return {"error": str(e), "detail": err}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
