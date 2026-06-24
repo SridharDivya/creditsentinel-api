@@ -69,8 +69,6 @@ MAIL_PORT           = int(os.getenv("MAIL_PORT", 2525))
 MAIL_USERNAME       = os.getenv("MAIL_USERNAME")
 MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD")
 MAIL_FROM           = os.getenv("MAIL_FROM", "noreply@creditsentinel.com")
-# Set this in Render env vars to your Mailtrap inbox address
-# e.g. abc123@inbox.mailtrap.io
 MAIL_TEST_RECIPIENT = os.getenv("MAIL_TEST_RECIPIENT", "test@inbox.mailtrap.io")
 
 # =========================================================
@@ -172,8 +170,6 @@ def safe_str(val, default=""):
 
 # =========================================================
 # EMAIL
-# Always sends — falls back to MAIL_TEST_RECIPIENT
-# if no real applicant email found in CSV
 # =========================================================
 def send_email(recipient: str, subject: str, body: str) -> bool:
     try:
@@ -206,7 +202,7 @@ def send_email(recipient: str, subject: str, body: str) -> bool:
 # SHARED HELPERS
 # =========================================================
 def get_risk_tier(risk_score: float) -> str:
-    if risk_score < 0.4:   return "Low"
+    if risk_score < 0.4:    return "Low"
     elif risk_score < 0.65: return "Medium"
     else:                   return "High"
 
@@ -216,9 +212,6 @@ def get_status(risk_tier: str) -> str:
 def get_foir(monthly_income: float, monthly_emi: float) -> float:
     return round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
 
-# =========================================================
-# FIX: EMI — try multiple possible column names
-# =========================================================
 def get_emi_from_row(row) -> float:
     for col in ["existing_monthly_emi", "monthly_emi", "emi", "current_emi", "total_emi"]:
         val = safe_float(row.get(col, None), default=-1)
@@ -226,16 +219,12 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
-# =========================================================
-# FIX: DECISION DATE — real timestamp from DB audit trail
-# =========================================================
 def get_decision_date(application_id: str) -> str:
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT MAX(timestamp)
-            FROM audit_trail
+            SELECT MAX(timestamp) FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
@@ -247,10 +236,6 @@ def get_decision_date(application_id: str) -> str:
     except Exception:
         return ""
 
-# =========================================================
-# FIX: APPLICATION STATUS — real status from DB
-# Falls back to risk-tier-based if not in DB yet
-# =========================================================
 def get_real_status(application_id: str, risk_tier: str) -> str:
     try:
         conn   = get_db_connection()
@@ -270,6 +255,27 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
         return get_status(risk_tier)
     except Exception:
         return get_status(risk_tier)
+
+# =========================================================
+# AUTO NOTE GENERATOR — based on credit score
+# =========================================================
+def generate_decision_note(decision: str, risk_score: float, risk_tier: str, cibil_score: int) -> str:
+    if decision == "APPROVE":
+        return (
+            f"Credit profile low risk — approved. "
+            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
+        )
+    elif decision == "REJECT":
+        return (
+            f"Credit profile high risk — rejected. "
+            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
+        )
+    elif decision == "REVIEW":
+        return (
+            f"Credit profile medium risk — sent for manual review. "
+            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
+        )
+    return f"Decision based on risk score: {risk_score} | CIBIL: {cibil_score}"
 
 # =========================================================
 # CIBIL SCORE
@@ -321,9 +327,9 @@ def get_ml_credit_score(risk_score: float) -> int:
 # =========================================================
 # FEATURE CACHE
 # =========================================================
-_feature_cache: dict      = {}
-_feature_cache_lock       = threading.Lock()
-FEATURE_CACHE_MAX         = 500
+_feature_cache: dict = {}
+_feature_cache_lock  = threading.Lock()
+FEATURE_CACHE_MAX    = 500
 
 def _get_cached_features(application_id: str) -> dict:
     with _feature_cache_lock:
@@ -363,7 +369,7 @@ class BatchScoreRequest(BaseModel):
 class DecisionRequest(BaseModel):
     decision:     str
     notes:        Optional[str] = ""
-    analyst_name: str                   # required — who made the decision
+    analyst_name: str
     timestamp:    Optional[str] = None
 
 # =========================================================
@@ -422,11 +428,6 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
-# FIX 1: foir uses multi-column EMI fallback
-# FIX 2: application_status from DB (real)
-# FIX 3: decision_date from DB audit trail (real)
-# FIX 4: created_at from CSV application_date
-# FIX 5: processing_time exposed for latency monitoring
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -453,7 +454,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             risk_score     = result["risk_score"]
             risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
-            monthly_emi    = get_emi_from_row(row)   # FIX 1
+            monthly_emi    = get_emi_from_row(row)
 
             applications.append({
                 "application_id":     app_id,
@@ -465,9 +466,9 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
                 "credit_score":       get_ml_credit_score(risk_score),
-                "application_status": get_real_status(app_id, risk_tier),   # FIX 2
-                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),  # FIX 4
-                "decision_date":      get_decision_date(app_id),             # FIX 3
+                "application_status": get_real_status(app_id, risk_tier),
+                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
+                "decision_date":      get_decision_date(app_id),
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -525,8 +526,7 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# HISTORY — GET /api/applications/{id}/history
-# Returns analyst_name for every record
+# HISTORY
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
@@ -559,25 +559,38 @@ def get_decision_history(application_id: str):
 
         if not rows:
             try:
-                numeric   = int(clean_id.split("-")[-1]) - 1
-                csv_row   = applications_df.iloc[numeric % len(applications_df)].copy()
+                numeric    = int(clean_id.split("-")[-1]) - 1
+                csv_row    = applications_df.iloc[numeric % len(applications_df)].copy()
                 csv_row["application_id"] = application_id
+
                 score_data  = generate_risk_score(application_id)
+                risk_score  = score_data["risk_score"]
                 risk_tier   = score_data["risk_tier"]
+                cibil_score = compute_cibil_score(csv_row)
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
-                status_note = f"Credit profile {risk_tier.lower()} risk — auto decision based on model score {score_data['risk_score']}"
-                app_date    = safe_str(csv_row.get("application_date", ""))
-                payload     = {
-                    "application_id": application_id, "decision": decision,
-                    "notes": status_note, "applicant_name": csv_applicant_name,
-                    "analyst_name": "SYSTEM",
+
+                # AUTO NOTE based on credit score
+                auto_note = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
+                app_date  = safe_str(csv_row.get("application_date", ""))
+
+                payload = {
+                    "application_id": application_id,
+                    "decision":       decision,
+                    "notes":          auto_note,
+                    "applicant_name": csv_applicant_name,
+                    "analyst_name":   "Divya",
                 }
                 real_audit_id = _audit_worker(payload)
+
                 return {"history": [{
-                    "audit_id": real_audit_id, "decision": decision,
-                    "notes": status_note, "timestamp": app_date,
-                    "applicant_name": csv_applicant_name, "analyst_name": "SYSTEM",
+                    "audit_id":       real_audit_id,
+                    "decision":       decision,
+                    "notes":          auto_note,
+                    "timestamp":      app_date,
+                    "applicant_name": csv_applicant_name,
+                    "analyst_name":   "Divya",
                 }]}
+
             except Exception as insert_err:
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
                 return {"history": []}
@@ -597,7 +610,7 @@ def get_decision_history(application_id: str):
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
                 "applicant_name": final_applicant_name,
-                "analyst_name":   safe_str(row[5]) if len(row) > 5 and row[5] else "",
+                "analyst_name":   safe_str(row[5]) if len(row) > 5 and row[5] else "Divya",
             })
 
         return {"history": history}
@@ -606,10 +619,8 @@ def get_decision_history(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# PROCESS DECISION — POST /api/applications/{id}/process-decision
-# FIX: email always fires (fallback to MAIL_TEST_RECIPIENT)
-# FIX: analyst_name saved to audit_trail
-# FIX: processing_time returned for latency monitoring
+# PROCESS DECISION
+# UPDATED: auto-generates note from credit score if not provided
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
@@ -627,8 +638,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
         return {"status": "failed", "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
 
     decision     = decision_map[decision]
-    notes        = req.notes or ""
-    analyst_name = req.analyst_name or ""
+    analyst_name = req.analyst_name or "Divya"
     conn         = None
     search_id    = str(application_id).strip().upper()
 
@@ -647,6 +657,16 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
 
+    # AUTO NOTE: generate from credit score if no note provided
+    if req.notes and req.notes.strip():
+        notes = req.notes.strip()
+    else:
+        score_data  = generate_risk_score(application_id)
+        risk_score  = score_data["risk_score"]
+        risk_tier   = score_data["risk_tier"]
+        cibil_score = compute_cibil_score(matched.iloc[0])
+        notes       = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
+
     # Try multiple possible email column names from CSV
     recipient_email = ""
     for col in ["email", "email_address", "applicant_email", "mail", "contact_email"]:
@@ -655,7 +675,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
             recipient_email = val.strip()
             break
 
-    # Always fall back to Mailtrap test inbox if no email in CSV
     if not recipient_email:
         recipient_email = MAIL_TEST_RECIPIENT
         print(f"[EMAIL] No CSV email for {application_id} — using: {recipient_email}")
@@ -698,9 +717,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
-        # ==========================================
-        # SEND EMAIL — always fires via Mailtrap
-        # ==========================================
+        # SEND EMAIL
         if decision == "APPROVE":
             email_sent = send_email(
                 recipient_email,
@@ -708,6 +725,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
                 f"""Hello {real_applicant_name},
 
 Congratulations! Your loan application {application_id} has been APPROVED.
+
+{notes}
 
 Regards,
 CreditSentinel Team"""
@@ -720,7 +739,7 @@ CreditSentinel Team"""
 
 Your loan application {application_id} has been REJECTED.
 
-Reason: {notes}
+{notes}
 
 Regards,
 CreditSentinel Team"""
@@ -732,7 +751,8 @@ CreditSentinel Team"""
                 f"""Hello {real_applicant_name},
 
 Your loan application {application_id} is currently UNDER REVIEW.
-Our team will contact you shortly.
+
+{notes}
 
 Regards,
 CreditSentinel Team"""
@@ -770,7 +790,8 @@ CreditSentinel Team"""
         "notification_sent": notification_sent,
         "email_sent":        email_sent,
         "email_to":          recipient_email,
-        "processing_time":   processing_time,        # seconds — for latency monitoring
+        "processing_time":   processing_time,
+        "notes":             notes,
         "message":           "Decision processed successfully",
     }
 
@@ -805,10 +826,10 @@ def portfolio_summary():
         score += np.select([employment_years>=10, employment_years>=5,
                             employment_years>=3,  employment_years>=1], [40,25,10,-5], default=-25)
 
-        score  = score.clip(300, 900).astype(int)
-        low    = int((score >= 750).sum())
-        medium = int(((score >= 650) & (score < 750)).sum())
-        high   = int((score < 650).sum())
+        score   = score.clip(300, 900).astype(int)
+        low     = int((score >= 750).sum())
+        medium  = int(((score >= 650) & (score < 750)).sum())
+        high    = int((score < 650).sum())
         elapsed = round(time.time() - start, 2)
 
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
