@@ -572,25 +572,36 @@ def get_decision_history(application_id: str):
                 # AUTO NOTE based on credit score
                 auto_note = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
                 app_date  = safe_str(csv_row.get("application_date", ""))
-
-                payload = {
-                    "application_id": application_id,
-                    "decision":       decision,
-                    "notes":          auto_note,
-                    "applicant_name": csv_applicant_name,
-                    "analyst_name":   "Divya",
-                }
+                 audit_payload = {
+    "application_id": application_id,
+    "decision": decision,
+    "notes": notes,
+    "applicant_name": real_applicant_name,
+    "analyst_name": current_user_name,
+    "processing_time": processing_time
+}
+                
                 real_audit_id = _audit_worker(payload)
 
-                return {"history": [{
-                    "audit_id":       real_audit_id,
-                    "decision":       decision,
-                    "notes":          auto_note,
-                    "timestamp":      app_date,
-                    "applicant_name": csv_applicant_name,
-                    "analyst_name":   "Divya",
-                }]}
+              latency_ms = round(processing_time * 1000, 2)
+              
 
+return {
+    "application_id": application_id,
+    "applicant_name": real_applicant_name,
+    "analyst_name": current_user_name,
+    "audit_id": audit_id,
+    "status": decision.lower(),
+    "next_action": notification_type,
+    "notification_sent": notification_sent,
+    "email_sent": email_sent,
+
+    "processing_time_seconds": processing_time,
+    "latency_ms": latency_ms,
+
+    "message": "Decision processed successfully"
+}
+               
             except Exception as insert_err:
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
                 return {"history": []}
@@ -611,7 +622,10 @@ def get_decision_history(application_id: str):
                 "timestamp":      row[3].isoformat() if row[3] else None,
                 "applicant_name": final_applicant_name,
                 "analyst_name":   safe_str(row[5]) if len(row) > 5 and row[5] else "Divya",
+                "processing_time_seconds": float(row[6]) if row[6] else 0,
+                "latency_ms": round(float(row[6]) * 1000, 2) if row[6] else 0
             })
+            
 
         return {"history": history}
 
@@ -779,6 +793,7 @@ CreditSentinel Team"""
     }
     audit_id        = await asyncio.create_task(fire_and_forget_audit(audit_payload))
     processing_time = round(time.time() - decision_start, 3)
+    latency_ms = round( processing_time_seconds * 1000, 2)
 
     return {
         "application_id":    application_id,
@@ -792,6 +807,7 @@ CreditSentinel Team"""
         "email_to":          recipient_email,
         "processing_time":   processing_time,
         "notes":             notes,
+        "latency_ms": latency_ms,
         "message":           "Decision processed successfully",
     }
 
