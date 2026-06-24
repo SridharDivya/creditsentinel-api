@@ -363,8 +363,9 @@ class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
 class DecisionRequest(BaseModel):
-    decision:  str
-    notes:     Optional[str] = ""
+    decision: str
+    notes: Optional[str] = ""
+    analyst_name: str
     timestamp: Optional[str] = None
 
 # =========================================================
