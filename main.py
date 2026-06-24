@@ -841,21 +841,22 @@ CreditSentinel Team
             }
         )
 
-current_user_name = "Divya"
+     current_user_name = "Divya"
 
-audit_payload = {
-    "application_id": application_id,
-    "decision": decision,
-    "notes": notes,
-    "applicant_name": real_applicant_name,
-    "analyst_name": current_user_name
-}
+    audit_payload = {
+        "application_id": application_id,
+        "decision": decision,
+        "notes": notes,
+        "applicant_name": real_applicant_name,
+        "analyst_name": current_user_name
+    }
 
     audit_task = asyncio.create_task(
         fire_and_forget_audit(audit_payload)
     )
 
     audit_id = await audit_task
+    
 
     # NEW: total time from start of function to response
     processing_time = round(time.time() - decision_start, 3)
