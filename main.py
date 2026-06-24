@@ -56,7 +56,8 @@ print("✅ Model Loaded")
 applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
 print(f"✅ Applications Loaded: {len(applications_df)} rows")
 print("CSV COLUMNS:", list(applications_df.columns))
-
+print("APPLICATION COLUMNS:")
+print(applications_df.columns.tolist())
 # Total applications count shown in all API responses
 TOTAL_APPLICATIONS = 15000
 
@@ -695,7 +696,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
     real_applicant_name = safe_str(
         matched.iloc[0].get("applicant_name", "Unknown Applicant")
     )
-
+print("MATCHED ROW:")
+print(matched.iloc[0].to_dict())
     # CHANGE THIS COLUMN NAME IF NEEDED
     recipient_email = safe_str(
         matched.iloc[0].get("email", "")
