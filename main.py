@@ -572,7 +572,12 @@ def get_decision_history(application_id: str):
                 # AUTO NOTE based on credit score
                 auto_note = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
                 app_date  = safe_str(csv_row.get("application_date", ""))
-                 audit_payload = {
+                processing_time = round(
+    time.time() - decision_start,
+    3
+)
+
+audit_payload = {
     "application_id": application_id,
     "decision": decision,
     "notes": notes,
@@ -580,6 +585,12 @@ def get_decision_history(application_id: str):
     "analyst_name": current_user_name,
     "processing_time": processing_time
 }
+
+audit_task = asyncio.create_task(
+    fire_and_forget_audit(audit_payload)
+)
+
+audit_id = await audit_task
                 
                 real_audit_id = _audit_worker(payload)
 
