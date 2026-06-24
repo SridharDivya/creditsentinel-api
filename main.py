@@ -108,8 +108,8 @@ def _audit_worker(payload: dict):
         cursor.execute("""
             INSERT INTO audit_trail
                 (application_id, decision, decision_notes,
-                 applicant_name, analyst_name, timestamp)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                 applicant_name, analyst_name, processing_time, timestamp)
+            VALUES (%s, %s, %s, %s,&S, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
         """, (
             payload["application_id"],
@@ -548,7 +548,7 @@ def get_decision_history(application_id: str):
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
+            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name,processing_time
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -794,14 +794,17 @@ CreditSentinel Team"""
         return JSONResponse(status_code=500, content={
             "status": "failed", "application_id": application_id, "error": str(e)
         })
+ processing_time = round(time.time() - decision_start, 3)
 
-    audit_payload = {
-        "application_id": application_id,
-        "decision":       decision,
-        "notes":          notes,
-        "applicant_name": real_applicant_name,
-        "analyst_name":   analyst_name,
-    }
+audit_payload = {
+    "application_id": application_id,
+    "decision": decision,
+    "notes": notes,
+    "applicant_name": real_applicant_name,
+    "analyst_name": analyst_name,
+    "processing_time": processing_time
+} 
+    
     audit_id        = await asyncio.create_task(fire_and_forget_audit(audit_payload))
     processing_time = round(time.time() - decision_start, 3)
     latency_ms = round( processing_time_seconds * 1000, 2)
