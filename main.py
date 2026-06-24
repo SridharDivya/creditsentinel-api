@@ -696,8 +696,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
     real_applicant_name = safe_str(
         matched.iloc[0].get("applicant_name", "Unknown Applicant")
     )
-print("MATCHED ROW:")
-print(matched.iloc[0].to_dict())
     # CHANGE THIS COLUMN NAME IF NEEDED
     recipient_email = safe_str(
         matched.iloc[0].get("email", "")
