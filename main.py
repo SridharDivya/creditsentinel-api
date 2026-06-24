@@ -97,7 +97,6 @@ except Exception as e:
 
 # =========================================================
 # ASYNC AUDIT WORKER
-# saves processing_time to audit_trail
 # =========================================================
 _audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 
@@ -117,8 +116,8 @@ def _audit_worker(payload: dict):
             payload["decision"],
             payload["notes"],
             payload["applicant_name"],
-            payload.get("analyst_name", ""),
-            payload.get("processing_time", None),
+            payload.get("analyst_name", "Divya"),
+            payload.get("processing_time", 0.0)
         ))
         audit_id = cursor.fetchone()[0]
         conn.commit()
@@ -258,9 +257,6 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
     except Exception:
         return get_status(risk_tier)
 
-# =========================================================
-# GET PROCESSING TIME FOR APPLICATION from audit_trail
-# =========================================================
 def get_processing_time(application_id: str) -> float:
     try:
         conn   = get_db_connection()
@@ -275,12 +271,12 @@ def get_processing_time(application_id: str) -> float:
         db_pool.putconn(conn)
         if row and row[0] is not None:
             return round(float(row[0]), 3)
-        return None
+        return 0.0
     except Exception:
-        return None
+        return 0.0
 
 # =========================================================
-# AUTO NOTE GENERATOR
+# AUTO NOTE GENERATOR — based on credit score
 # =========================================================
 def generate_decision_note(decision: str, risk_score: float, risk_tier: str, cibil_score: int) -> str:
     if decision == "APPROVE":
@@ -415,24 +411,26 @@ def score_application(req: ScoreRequest):
     start_time = time.time()
     try:
         result     = generate_risk_score(req.application_id)
-        latency_ms = (time.time() - start_time) * 1000
+        processing_time = round(time.time() - start_time, 4)
+        latency_ms = round(processing_time * 1000, 2)
         log_entry  = {
             "timestamp": datetime.now().isoformat(), "application_id": req.application_id,
             "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
-            "latency_ms": round(latency_ms, 2), "status": "success",
+            "processing_time_seconds": processing_time, "latency_ms": latency_ms, "status": "success",
         }
         with open("model_predictions.log", "a") as f:
             f.write(json.dumps(log_entry) + "\n")
         return {
             "application_id": req.application_id, "model_loaded": True,
             "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
-            "features_used": len(MODEL_FEATURES), "latency_ms": round(latency_ms, 2),
+            "features_used": len(MODEL_FEATURES), "processing_time_seconds": processing_time, "latency_ms": latency_ms,
         }
     except Exception as e:
-        latency_ms = (time.time() - start_time) * 1000
+        processing_time = round(time.time() - start_time, 4)
+        latency_ms = round(processing_time * 1000, 2)
         with open("model_predictions.log", "a") as f:
             f.write(json.dumps({"timestamp": datetime.now().isoformat(),
-                "application_id": req.application_id, "latency_ms": round(latency_ms, 2),
+                "application_id": req.application_id, "processing_time_seconds": processing_time, "latency_ms": latency_ms,
                 "status": "error", "error": str(e)}) + "\n")
         return {"application_id": req.application_id, "model_loaded": False, "error": str(e)}
 
@@ -441,17 +439,24 @@ def score_application(req: ScoreRequest):
 # =========================================================
 @app.post("/api/score-batch")
 def score_batch(req: BatchScoreRequest):
+    start_time = time.time()
     with ThreadPoolExecutor(max_workers=min(8, len(req.application_ids))) as ex:
         futures = {ex.submit(generate_risk_score, app_id): app_id for app_id in req.application_ids}
         results = []
         for future, app_id in futures.items():
             r = future.result()
             results.append({"application_id": app_id, "risk_score": r["risk_score"], "risk_tier": r["risk_tier"]})
-    return {"total_applications": len(results), "results": results}
+    
+    processing_time = round(time.time() - start_time, 4)
+    return {
+        "total_applications": len(results), 
+        "results": results, 
+        "processing_time_seconds": processing_time, 
+        "latency_ms": round(processing_time * 1000, 2)
+    }
 
 # =========================================================
 # APPLICATIONS LIST
-# UPDATED: processing_time added per application
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -479,6 +484,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = get_emi_from_row(row)
+            p_time         = get_processing_time(app_id)
 
             applications.append({
                 "application_id":     app_id,
@@ -493,7 +499,8 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "application_status": get_real_status(app_id, risk_tier),
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
                 "decision_date":      get_decision_date(app_id),
-                "processing_time":    get_processing_time(app_id),   # latency in seconds from DB
+                "processing_time_seconds": p_time,
+                "latency_ms":         round(p_time * 1000, 2)
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -504,7 +511,6 @@ def get_applications(limit: int = 10, offset: int = 0):
 
 # =========================================================
 # APPLICATION DETAIL
-# UPDATED: processing_time added
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
@@ -529,6 +535,7 @@ def get_application_detail(application_id: str):
         risk_tier    = score_data["risk_tier"]
         cibil_score  = compute_cibil_score(row)
         credit_score = get_ml_credit_score(risk_score)
+        p_time       = get_processing_time(application_id)
 
         print(f"[DETAIL] id={application_id} | cibil={cibil_score} | credit={credit_score} | risk={risk_score}")
 
@@ -545,7 +552,8 @@ def get_application_detail(application_id: str):
             "application_status": get_real_status(application_id, risk_tier),
             "date_applied":       safe_str(row.get("application_date", row.get("date_applied", ""))),
             "decision_date":      get_decision_date(application_id),
-            "processing_time":    get_processing_time(application_id),
+            "processing_time_seconds": p_time,
+            "latency_ms":         round(p_time * 1000, 2)
         }
 
     except Exception as e:
@@ -575,8 +583,7 @@ def get_decision_history(application_id: str):
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT audit_id, decision, decision_notes, timestamp,
-                   applicant_name, analyst_name, processing_time
+            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name, processing_time
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -587,6 +594,7 @@ def get_decision_history(application_id: str):
 
         if not rows:
             try:
+                start_time = time.time()
                 numeric    = int(clean_id.split("-")[-1]) - 1
                 csv_row    = applications_df.iloc[numeric % len(applications_df)].copy()
                 csv_row["application_id"] = application_id
@@ -596,8 +604,9 @@ def get_decision_history(application_id: str):
                 risk_tier   = score_data["risk_tier"]
                 cibil_score = compute_cibil_score(csv_row)
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
-                auto_note   = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
-                app_date    = safe_str(csv_row.get("application_date", ""))
+
+                auto_note = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
+                processing_time = round(time.time() - start_time, 4)
 
                 payload = {
                     "application_id":  application_id,
@@ -605,18 +614,21 @@ def get_decision_history(application_id: str):
                     "notes":           auto_note,
                     "applicant_name":  csv_applicant_name,
                     "analyst_name":    "Divya",
-                    "processing_time": None,
+                    "processing_time": processing_time
                 }
+                
                 real_audit_id = _audit_worker(payload)
+                latency_ms = round(processing_time * 1000, 2)
 
                 return {"history": [{
-                    "audit_id":        real_audit_id,
-                    "decision":        decision,
-                    "notes":           auto_note,
-                    "timestamp":       app_date,
-                    "applicant_name":  csv_applicant_name,
-                    "analyst_name":    "Divya",
-                    "processing_time": None,
+                    "audit_id":       real_audit_id,
+                    "decision":       decision,
+                    "notes":          auto_note,
+                    "timestamp":      datetime.now().isoformat(),
+                    "applicant_name": csv_applicant_name,
+                    "analyst_name":   "Divya",
+                    "processing_time_seconds": processing_time,
+                    "latency_ms":     latency_ms
                 }]}
 
             except Exception as insert_err:
@@ -632,14 +644,16 @@ def get_decision_history(application_id: str):
                 if (db_value is None or db_str == "" or db_str.lower() in ["none", "null"])
                 else safe_str(db_value)
             )
+            p_time = float(row[6]) if row[6] else 0.0
             history.append({
-                "audit_id":        row[0],
-                "decision":        row[1],
-                "notes":           row[2],
-                "timestamp":       row[3].isoformat() if row[3] else None,
-                "applicant_name":  final_applicant_name,
-                "analyst_name":    safe_str(row[5]) if len(row) > 5 and row[5] else "Divya",
-                "processing_time": round(float(row[6]), 3) if len(row) > 6 and row[6] is not None else None,
+                "audit_id":       row[0],
+                "decision":       row[1],
+                "notes":          row[2],
+                "timestamp":      row[3].isoformat() if row[3] else None,
+                "applicant_name": final_applicant_name,
+                "analyst_name":   safe_str(row[5]) if len(row) > 5 and row[5] else "Divya",
+                "processing_time_seconds": p_time,
+                "latency_ms":     round(p_time * 1000, 2)
             })
 
         return {"history": history}
@@ -652,7 +666,6 @@ def get_decision_history(application_id: str):
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
-
     decision_start = time.time()
 
     decision_map = {
@@ -685,7 +698,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
 
-    # AUTO NOTE from credit score if none provided
     if req.notes and req.notes.strip():
         notes = req.notes.strip()
     else:
@@ -695,7 +707,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
         cibil_score = compute_cibil_score(matched.iloc[0])
         notes       = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
 
-    # Try multiple email column names
     recipient_email = ""
     for col in ["email", "email_address", "applicant_email", "mail", "contact_email"]:
         val = safe_str(matched.iloc[0].get(col, ""))
@@ -709,6 +720,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     notification_sent = False
     notification_type = None
+    email_sent = False
 
     try:
         conn   = get_db_connection()
@@ -747,21 +759,22 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
         if decision == "APPROVE":
             email_sent = send_email(
-                recipient_email, "Loan Application Approved",
+                recipient_email,
+                "Loan Application Approved",
                 f"Hello {real_applicant_name},\n\nCongratulations! Your loan application {application_id} has been APPROVED.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
             )
         elif decision == "REJECT":
             email_sent = send_email(
-                recipient_email, "Loan Application Rejected",
+                recipient_email,
+                "Loan Application Rejected",
                 f"Hello {real_applicant_name},\n\nYour loan application {application_id} has been REJECTED.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
             )
         elif decision == "REVIEW":
             email_sent = send_email(
-                recipient_email, "Application Under Review",
+                recipient_email,
+                "Application Under Review",
                 f"Hello {real_applicant_name},\n\nYour loan application {application_id} is currently UNDER REVIEW.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
             )
-        else:
-            email_sent = False
 
     except Exception as e:
         if conn:
@@ -773,7 +786,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
             "status": "failed", "application_id": application_id, "error": str(e)
         })
 
-    processing_time = round(time.time() - decision_start, 3)
+    processing_time = round(time.time() - decision_start, 4)
+    latency_ms = round(processing_time * 1000, 2)
 
     audit_payload = {
         "application_id":  application_id,
@@ -781,8 +795,9 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "notes":           notes,
         "applicant_name":  real_applicant_name,
         "analyst_name":    analyst_name,
-        "processing_time": processing_time,
-    }
+        "processing_time": processing_time
+    } 
+    
     audit_id = await asyncio.create_task(fire_and_forget_audit(audit_payload))
 
     return {
@@ -795,7 +810,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "notification_sent": notification_sent,
         "email_sent":        email_sent,
         "email_to":          recipient_email,
-        "processing_time":   processing_time,
+        "processing_time_seconds": processing_time,
+        "latency_ms":        latency_ms,
         "notes":             notes,
         "message":           "Decision processed successfully",
     }
@@ -835,7 +851,7 @@ def portfolio_summary():
         low     = int((score >= 750).sum())
         medium  = int(((score >= 650) & (score < 750)).sum())
         high    = int((score < 650).sum())
-        elapsed = round(time.time() - start, 2)
+        elapsed = round(time.time() - start, 4)
 
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
         return {
@@ -843,7 +859,8 @@ def portfolio_summary():
             "high":                   high,
             "medium":                 medium,
             "low":                    low,
-            "execution_time_seconds": elapsed,
+            "processing_time_seconds": elapsed,
+            "latency_ms":             round(elapsed * 1000, 2)
         }
 
     except Exception as e:
@@ -856,3 +873,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+                            employm
