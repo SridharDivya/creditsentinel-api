@@ -779,16 +779,19 @@ async def process_decision(application_id: str, req: DecisionRequest):
         # ==========================
         # SEND EMAIL VIA MAILTRAP
         # ==========================
+           # ==========================
+        # SEND EMAIL VIA MAILTRAP
+        # ==========================
 
-     email_sent = False
+        email_sent = False
 
-if recipient_email:
+        if recipient_email:
 
-    if decision == "APPROVE":
-        email_sent = send_email(
-            recipient_email,
-            "Loan Application Approved",
-            f"""
+            if decision == "APPROVE":
+                email_sent = send_email(
+                    recipient_email,
+                    "Loan Application Approved",
+                    f"""
 Hello {real_applicant_name},
 
 Congratulations!
@@ -798,13 +801,13 @@ Your loan application {application_id} has been APPROVED.
 Regards,
 CreditSentinel Team
 """
-        )
+                )
 
-    elif decision == "REJECT":
-        email_sent = send_email(
-            recipient_email,
-            "Loan Application Rejected",
-            f"""
+            elif decision == "REJECT":
+                email_sent = send_email(
+                    recipient_email,
+                    "Loan Application Rejected",
+                    f"""
 Hello {real_applicant_name},
 
 Your loan application {application_id} has been REJECTED.
@@ -815,13 +818,13 @@ Reason:
 Regards,
 CreditSentinel Team
 """
-        )
+                )
 
-    elif decision == "REVIEW":
-        email_sent = send_email(
-            recipient_email,
-            "Application Under Review",
-            f"""
+            elif decision == "REVIEW":
+                email_sent = send_email(
+                    recipient_email,
+                    "Application Under Review",
+                    f"""
 Hello {real_applicant_name},
 
 Your loan application {application_id} is currently UNDER REVIEW.
@@ -831,15 +834,17 @@ Our team will contact you shortly.
 Regards,
 CreditSentinel Team
 """
-        ) 
+                )
 
     except Exception as e:
         if conn:
             conn.rollback()
+
             try:
                 cursor.close()
             except Exception:
                 pass
+
             db_pool.putconn(conn)
 
         return JSONResponse(
