@@ -177,6 +177,7 @@ def safe_str(val, default=""):
         return str(val)
     except:
         return default
+
 def send_email(recipient, subject, body):
     try:
         msg = MIMEMultipart()
@@ -202,6 +203,7 @@ def send_email(recipient, subject, body):
     except Exception as e:
         print(f"EMAIL ERROR: {e}")
         return False
+
 # =========================================================
 # SHARED HELPERS
 # =========================================================
@@ -439,6 +441,7 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
+# UPDATED: added created_at and decision_date for Jaajitha
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -478,7 +481,10 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
                 "credit_score":       get_ml_credit_score(risk_score),
-                "application_status": get_status(risk_tier)
+                "application_status": get_status(risk_tier),
+                # --- NEW: date fields for Jaajitha's dashboard ---
+                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
+                "decision_date":      safe_str(row.get("decision_date", "")),
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -574,7 +580,8 @@ def get_decision_history(application_id: str):
                    decision,
                    decision_notes,
                    timestamp,
-                   applicant_name
+                   applicant_name,
+                   analyst_name
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -596,7 +603,6 @@ def get_decision_history(application_id: str):
                 status_note = f"Credit profile {risk_tier.lower()} risk — auto decision based on model score {score_data['risk_score']}"
                 app_date    = safe_str(csv_row.get("application_date", ""))
 
-                # Fire async so the HTTP response is not blocked
                 payload = {
                     "application_id": application_id,
                     "decision":       decision,
@@ -611,7 +617,8 @@ def get_decision_history(application_id: str):
                         "decision":       decision,
                         "notes":          status_note,
                         "timestamp":      app_date,
-                        "applicant_name": csv_applicant_name
+                        "applicant_name": csv_applicant_name,
+                        "analyst_name":   ""
                     }]
                 }
 
@@ -634,7 +641,8 @@ def get_decision_history(application_id: str):
                 "decision":       row[1],
                 "notes":          row[2],
                 "timestamp":      row[3].isoformat() if row[3] else None,
-                "applicant_name": final_applicant_name
+                "applicant_name": final_applicant_name,
+                "analyst_name":   safe_str(row[5]) if len(row) > 5 else ""
             })
 
         return {"history": history}
@@ -644,11 +652,13 @@ def get_decision_history(application_id: str):
 
 # =========================================================
 # AUDIT TRAIL — POST /api/applications/{id}/process-decision
-# Now returns immediately after queuing the audit insert;
-# the INSERT runs in the background thread pool.
+# UPDATED: tracks processing_time (decision duration in seconds)
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
+
+    # NEW: start timer to track total decision processing time
+    decision_start = time.time()
 
     decision_map = {
         "APPROVE":  "APPROVE",
@@ -696,7 +706,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
     real_applicant_name = safe_str(
         matched.iloc[0].get("applicant_name", "Unknown Applicant")
     )
-    # CHANGE THIS COLUMN NAME IF NEEDED
     recipient_email = safe_str(
         matched.iloc[0].get("email", "")
     )
@@ -830,16 +839,21 @@ CreditSentinel Team
 
     audit_id = await audit_task
 
+    # NEW: total time from start of function to response
+    processing_time = round(time.time() - decision_start, 3)
+
     return {
-        "application_id": application_id,
-        "applicant_name": real_applicant_name,
-        "audit_id": audit_id,
-        "status": decision.lower(),
-        "next_action": notification_type,
+        "application_id":    application_id,
+        "applicant_name":    real_applicant_name,
+        "audit_id":          audit_id,
+        "status":            decision.lower(),
+        "next_action":       notification_type,
         "notification_sent": notification_sent,
-        "email_sent": bool(recipient_email),
-        "message": "Decision processed successfully"
+        "email_sent":        bool(recipient_email),
+        "processing_time":   processing_time,
+        "message":           "Decision processed successfully"
     }
+
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
