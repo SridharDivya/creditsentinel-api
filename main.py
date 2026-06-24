@@ -101,42 +101,45 @@ _audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 def _audit_worker(payload: dict):
     """Blocking DB insert — runs in thread pool, not on the event loop."""
     conn = None
-    try:
-    conn = db_pool.getconn()
-    cursor = conn.cursor()
 
-    cursor.execute("""
-        INSERT INTO audit_trail
-        (
-            application_id,
-            decision,
-            decision_notes,
-            applicant_name,
-            analyst_name,
-            timestamp
-        )
-        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        RETURNING audit_id
-    """, (
-        payload["application_id"],
-        payload["decision"],
-        payload["notes"],
-        payload["applicant_name"],
-        payload["analyst_name"]
-    ))
+    try:
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO audit_trail
+            (
+                application_id,
+                decision,
+                decision_notes,
+                applicant_name,
+                analyst_name,
+                timestamp
+            )
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING audit_id
+        """, (
+            payload["application_id"],
+            payload["decision"],
+            payload["notes"],
+            payload["applicant_name"],
+            payload["analyst_name"]
+        ))
+
         audit_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
         return audit_id
+
     except Exception as e:
         if conn:
             conn.rollback()
         print(f"[AUDIT WORKER ERROR] {e}")
         return None
+
     finally:
         if conn:
             db_pool.putconn(conn)
-
 async def fire_and_forget_audit(payload: dict):
     """Submit audit insert to background thread, don't block the response."""
     loop = asyncio.get_event_loop()
