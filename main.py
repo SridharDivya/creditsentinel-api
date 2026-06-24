@@ -611,13 +611,16 @@ def get_decision_history(application_id: str):
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
                 status_note = f"Credit profile {risk_tier.lower()} risk — auto decision based on model score {score_data['risk_score']}"
                 app_date    = safe_str(csv_row.get("application_date", ""))
-
                 payload = {
                     "application_id": application_id,
-                    "decision":       decision,
-                    "notes":          status_note,
+                    "decision": decision,
+                    "notes": status_note,
                     "applicant_name": csv_applicant_name,
+                    "analyst_name": "SYSTEM"
                 }
+                
+
+                 
                 real_audit_id = _audit_worker(payload)
 
                 return {
@@ -835,12 +838,15 @@ CreditSentinel Team
             }
         )
 
-    audit_payload = {
-        "application_id": application_id,
-        "decision": decision,
-        "notes": notes,
-        "applicant_name": current_user_name,
-    }
+current_user_name = "Divya"
+
+audit_payload = {
+    "application_id": application_id,
+    "decision": decision,
+    "notes": notes,
+    "applicant_name": real_applicant_name,
+    "analyst_name": current_user_name
+}
 
     audit_task = asyncio.create_task(
         fire_and_forget_audit(audit_payload)
