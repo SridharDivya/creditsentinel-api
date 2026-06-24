@@ -102,27 +102,28 @@ def _audit_worker(payload: dict):
     """Blocking DB insert — runs in thread pool, not on the event loop."""
     conn = None
     try:
-        conn = db_pool.getconn()
-        cursor = conn.cursor()
-       cursor.execute("""
-    INSERT INTO audit_trail
-    (
-        application_id,
-        decision,
-        decision_notes,
-        applicant_name,
-        analyst_name,
-        timestamp
-    )
-    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-    RETURNING audit_id
-""", (
-    payload["application_id"],
-    payload["decision"],
-    payload["notes"],
-    payload["applicant_name"],
-    payload["analyst_name"]
-))
+    conn = db_pool.getconn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO audit_trail
+        (
+            application_id,
+            decision,
+            decision_notes,
+            applicant_name,
+            analyst_name,
+            timestamp
+        )
+        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        RETURNING audit_id
+    """, (
+        payload["application_id"],
+        payload["decision"],
+        payload["notes"],
+        payload["applicant_name"],
+        payload["analyst_name"]
+    ))
         audit_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
