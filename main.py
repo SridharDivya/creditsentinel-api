@@ -830,7 +830,7 @@ CreditSentinel Team
         "application_id": application_id,
         "decision": decision,
         "notes": notes,
-        "applicant_name": real_applicant_name,
+        "applicant_name": current_user_name,
     }
 
     audit_task = asyncio.create_task(
