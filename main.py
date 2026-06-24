@@ -208,7 +208,7 @@ def send_email(recipient, subject, body):
             recipient,
             msg.as_string()
         )
-
+   print("EMAIL SENT SUCCESSFULLY")
         server.quit()
         return True
 
@@ -725,7 +725,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
     recipient_email = safe_str(
         matched.iloc[0].get("email", "")
     )
-
+    print("EMAIL FOUND:", recipient_email)
     notification_sent = False
     notification_type = None
 
@@ -773,13 +773,15 @@ async def process_decision(application_id: str, req: DecisionRequest):
         # SEND EMAIL VIA MAILTRAP
         # ==========================
 
-        if recipient_email:
+     email_sent = False
 
-            if decision == "APPROVE":
-                send_email(
-                    recipient_email,
-                    "Loan Application Approved",
-                    f"""
+if recipient_email:
+
+    if decision == "APPROVE":
+        email_sent = send_email(
+            recipient_email,
+            "Loan Application Approved",
+            f"""
 Hello {real_applicant_name},
 
 Congratulations!
@@ -789,13 +791,13 @@ Your loan application {application_id} has been APPROVED.
 Regards,
 CreditSentinel Team
 """
-                )
+        )
 
-            elif decision == "REJECT":
-                send_email(
-                    recipient_email,
-                    "Loan Application Rejected",
-                    f"""
+    elif decision == "REJECT":
+        email_sent = send_email(
+            recipient_email,
+            "Loan Application Rejected",
+            f"""
 Hello {real_applicant_name},
 
 Your loan application {application_id} has been REJECTED.
@@ -806,13 +808,13 @@ Reason:
 Regards,
 CreditSentinel Team
 """
-                )
+        )
 
-            elif decision == "REVIEW":
-                send_email(
-                    recipient_email,
-                    "Application Under Review",
-                    f"""
+    elif decision == "REVIEW":
+        email_sent = send_email(
+            recipient_email,
+            "Application Under Review",
+            f"""
 Hello {real_applicant_name},
 
 Your loan application {application_id} is currently UNDER REVIEW.
@@ -822,7 +824,7 @@ Our team will contact you shortly.
 Regards,
 CreditSentinel Team
 """
-                )
+        ) 
 
     except Exception as e:
         if conn:
@@ -871,7 +873,7 @@ CreditSentinel Team
         "status": decision.lower(),
         "next_action": notification_type,
         "notification_sent": notification_sent,
-        "email_sent": bool(recipient_email),
+        "email_sent": email_sent,
         "processing_time": processing_time,
         "message": "Decision processed successfully"
     }
