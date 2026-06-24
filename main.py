@@ -176,7 +176,31 @@ def safe_str(val, default=""):
         return str(val)
     except:
         return default
+def send_email(recipient, subject, body):
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = MAIL_FROM
+        msg["To"] = recipient
+        msg["Subject"] = subject
 
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP(MAIL_HOST, MAIL_PORT)
+        server.starttls()
+        server.login(MAIL_USERNAME, MAIL_PASSWORD)
+
+        server.sendmail(
+            MAIL_FROM,
+            recipient,
+            msg.as_string()
+        )
+
+        server.quit()
+        return True
+
+    except Exception as e:
+        print(f"EMAIL ERROR: {e}")
+        return False
 # =========================================================
 # SHARED HELPERS
 # =========================================================
@@ -642,8 +666,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
         }
 
     decision = decision_map[decision]
-    notes    = req.notes or ""
-    conn     = None
+    notes = req.notes or ""
+    conn = None
 
     search_id = str(application_id).strip().upper()
 
@@ -662,19 +686,26 @@ async def process_decision(application_id: str, req: DecisionRequest):
         except Exception:
             return JSONResponse(
                 status_code=404,
-                content={"status": "failed", "error": f"Application ID {application_id} not found"}
+                content={
+                    "status": "failed",
+                    "error": f"Application ID {application_id} not found"
+                }
             )
 
     real_applicant_name = safe_str(
         matched.iloc[0].get("applicant_name", "Unknown Applicant")
     )
 
+    # CHANGE THIS COLUMN NAME IF NEEDED
+    recipient_email = safe_str(
+        matched.iloc[0].get("email", "")
+    )
+
     notification_sent = False
     notification_type = None
 
-    # ── STATUS UPDATE (synchronous — caller needs confirmation) ──
     try:
-        conn   = get_db_connection()
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         if decision == "APPROVE":
@@ -713,50 +744,102 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
+        # ==========================
+        # SEND EMAIL VIA MAILTRAP
+        # ==========================
+
+        if recipient_email:
+
+            if decision == "APPROVE":
+                send_email(
+                    recipient_email,
+                    "Loan Application Approved",
+                    f"""
+Hello {real_applicant_name},
+
+Congratulations!
+
+Your loan application {application_id} has been APPROVED.
+
+Regards,
+CreditSentinel Team
+"""
+                )
+
+            elif decision == "REJECT":
+                send_email(
+                    recipient_email,
+                    "Loan Application Rejected",
+                    f"""
+Hello {real_applicant_name},
+
+Your loan application {application_id} has been REJECTED.
+
+Reason:
+{notes}
+
+Regards,
+CreditSentinel Team
+"""
+                )
+
+            elif decision == "REVIEW":
+                send_email(
+                    recipient_email,
+                    "Application Under Review",
+                    f"""
+Hello {real_applicant_name},
+
+Your loan application {application_id} is currently UNDER REVIEW.
+
+Our team will contact you shortly.
+
+Regards,
+CreditSentinel Team
+"""
+                )
+
     except Exception as e:
         if conn:
             conn.rollback()
             try:
                 cursor.close()
-            except:
+            except Exception:
                 pass
             db_pool.putconn(conn)
 
         return JSONResponse(
             status_code=500,
             content={
-                "status":         "failed",
+                "status": "failed",
                 "application_id": application_id,
-                "error":          str(e)
+                "error": str(e)
             }
         )
 
-    # ── AUDIT INSERT (async — does not block the response) ──
     audit_payload = {
         "application_id": application_id,
-        "decision":       decision,
-        "notes":          notes,
+        "decision": decision,
+        "notes": notes,
         "applicant_name": real_applicant_name,
     }
-    # Schedule in background; response returns before INSERT completes
-    audit_task = asyncio.create_task(fire_and_forget_audit(audit_payload))
 
-    # Await the audit_id so it can be returned in the response.
-    # If you truly want fire-and-forget (and don't need audit_id in the
-    # response body), replace the next two lines with:
-    #   audit_id = "pending"
+    audit_task = asyncio.create_task(
+        fire_and_forget_audit(audit_payload)
+    )
+
     audit_id = await audit_task
 
     return {
-        "application_id":    application_id,
-        "applicant_name":    real_applicant_name,
-        "audit_id":          audit_id,
-        "status":            decision.lower(),
-        "next_action":       notification_type,
+        "application_id": application_id,
+        "applicant_name": real_applicant_name,
+        "audit_id": audit_id,
+        "status": decision.lower(),
+        "next_action": notification_type,
         "notification_sent": notification_sent,
-        "message":           "Decision processed successfully"
+        "email_sent": bool(recipient_email),
+        "message": "Decision processed successfully"
     }
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
