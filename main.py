@@ -864,17 +864,17 @@ CreditSentinel Team
     processing_time = round(time.time() - decision_start, 3)
 
     return {
-        "application_id":    application_id,
-        "applicant_name":    real_applicant_name,
-        "audit_id":          audit_id,
-        "status":            decision.lower(),
-        "next_action":       notification_type,
+        "application_id": application_id,
+        "applicant_name": real_applicant_name,
+        "analyst_name": current_user_name,
+        "audit_id": audit_id,
+        "status": decision.lower(),
+        "next_action": notification_type,
         "notification_sent": notification_sent,
-        "email_sent":        bool(recipient_email),
-        "processing_time":   processing_time,
-        "message":           "Decision processed successfully"
+        "email_sent": bool(recipient_email),
+        "processing_time": processing_time,
+        "message": "Decision processed successfully"
     }
-
 # =========================================================
 # PORTFOLIO SUMMARY
 # =========================================================
