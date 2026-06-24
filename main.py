@@ -843,7 +843,7 @@ CreditSentinel Team
         )
 
      
-    current_user_name = "Divya"
+    current_user_name = req.analyst_name
 
     audit_payload = {
         "application_id": application_id,
