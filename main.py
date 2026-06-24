@@ -192,6 +192,11 @@ def safe_str(val, default=""):
 
 def send_email(recipient, subject, body):
     try:
+        print("MAIL_HOST =", MAIL_HOST)
+        print("MAIL_PORT =", MAIL_PORT)
+        print("MAIL_USERNAME =", MAIL_USERNAME)
+        print("RECIPIENT =", recipient)
+
         msg = MIMEMultipart()
         msg["From"] = MAIL_FROM
         msg["To"] = recipient
@@ -208,7 +213,9 @@ def send_email(recipient, subject, body):
             recipient,
             msg.as_string()
         )
-   print("EMAIL SENT SUCCESSFULLY")
+
+        print("EMAIL SENT SUCCESSFULLY")
+
         server.quit()
         return True
 
