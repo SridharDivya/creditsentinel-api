@@ -841,7 +841,8 @@ CreditSentinel Team
             }
         )
 
-     current_user_name = "Divya"
+     
+    current_user_name = "Divya"
 
     audit_payload = {
         "application_id": application_id,
