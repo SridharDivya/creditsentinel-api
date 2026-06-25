@@ -51,6 +51,13 @@ applications_df = pd.read_csv(os.path.join(BASE_DIR, "loan_applications.csv"))
 print(f"✅ Applications Loaded: {len(applications_df)} rows")
 print("CSV COLUMNS:", list(applications_df.columns))
 
+# Pre-build O(1) lookup index — avoids full DataFrame scan on every request
+_csv_index: dict = {
+    str(row.get("application_id", "")).strip().upper(): row
+    for _, row in applications_df.iterrows()
+}
+print(f"✅ CSV index built: {len(_csv_index)} entries")
+
 TOTAL_APPLICATIONS = 15000
 
 # =========================================================
@@ -566,58 +573,66 @@ def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, ri
 # - email report fires silently on every call
 # - latency_ms: returned at top level
 # =========================================================
+# ── In-memory history cache: avoids repeat DB hits ──────────
+_history_cache: dict = {}
+_history_cache_lock  = threading.Lock()
+HISTORY_CACHE_TTL    = 30   # seconds — short TTL so new decisions show up quickly
+
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     history_start = time.time()
 
     try:
-        clean_id = str(application_id).strip().upper()
+        # Normalise once
+        clean_id = application_id.strip().upper()
 
-        # ── Resolve CSV row ──────────────────────────────────────
-        matched = applications_df[
-            applications_df["application_id"].astype(str).str.strip().str.upper() == clean_id
-        ]
-        if len(matched) == 0:
+        # ── 1. CSV row lookup — O(1) via pre-built index ─────────
+        csv_row = _csv_index.get(clean_id)
+        if csv_row is None:
             try:
-                numeric   = int(clean_id.split("-")[-1]) - 1
-                csv_row   = applications_df.iloc[numeric % len(applications_df)].copy()
+                numeric = int(clean_id.split("-")[-1]) - 1
+                csv_row = applications_df.iloc[numeric % len(applications_df)].copy()
                 csv_row["application_id"] = application_id
             except Exception:
                 csv_row = None
-        else:
-            csv_row = matched.iloc[0]
 
         csv_applicant_name   = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
         csv_application_date = safe_str(csv_row.get("application_date", "")) if csv_row is not None else ""
         csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
         csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
 
-        # ── Credit scores — cached, no recompute on repeat calls ──
-        score_data  = _get_cached_risk_score(application_id)
-        risk_score  = score_data["risk_score"]
-        risk_tier   = score_data["risk_tier"]
-        cibil_score = _get_cached_cibil(application_id, csv_row)
-
-        # ── Resolve email recipient ──────────────────────────────
-        email_to = ""
+        # ── 2. Email resolve — fast, no DB ───────────────────────
+        email_to = MAIL_TEST_RECIPIENT
         if csv_row is not None:
             for col in ["email", "email_address", "applicant_email", "mail"]:
                 v = safe_str(csv_row.get(col, ""))
                 if v.strip():
                     email_to = v.strip()
                     break
-        if not email_to:
-            email_to = MAIL_TEST_RECIPIENT
 
-        # ── Query audit_trail — single optimized query ───────────
+        # ── 3. Check history cache first ─────────────────────────
+        now = time.time()
+        with _history_cache_lock:
+            cached = _history_cache.get(clean_id)
+            if cached and (now - cached["ts"]) < HISTORY_CACHE_TTL:
+                result = dict(cached["data"])
+                result["latency_ms"] = round((time.time() - history_start) * 1000, 2)
+                return result
+
+        # ── 4. Score + CIBIL — from cache, not recomputed ────────
+        score_data  = _get_cached_risk_score(application_id)
+        risk_score  = score_data["risk_score"]
+        risk_tier   = score_data["risk_tier"]
+        cibil_score = _get_cached_cibil(application_id, csv_row)
+
+        # ── 5. Single DB query — no UPPER/TRIM overhead ──────────
         conn   = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
-            FROM audit_trail
-            WHERE application_id = %s
-            ORDER BY timestamp DESC
-        """, (application_id,))
+        cursor.execute(
+            "SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name "
+            "FROM audit_trail WHERE application_id = %s ORDER BY timestamp DESC LIMIT 50",
+            (application_id,)
+        )
         rows = cursor.fetchall()
         cursor.close()
         db_pool.putconn(conn)
@@ -739,12 +754,18 @@ def get_decision_history(application_id: str):
             send_email(email_to, f"History Report – {application_id}", "\n".join(lines))
         threading.Thread(target=_send_history_email, daemon=True).start()
 
-        return {
+        response = {
             "history":      history,
             "email_report": True,
             "email_to":     email_to,
             "latency_ms":   latency_ms,
         }
+
+        # ── Store in history cache for next 30s ──────────────────
+        with _history_cache_lock:
+            _history_cache[clean_id] = {"data": response, "ts": time.time()}
+
+        return response
 
     except Exception as e:
         return {"error": str(e)}
