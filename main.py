@@ -505,6 +505,35 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
+# SCORE + CIBIL CACHE — avoid recomputing on every history call
+# TTL: 1 hour per application_id
+# =========================================================
+_score_cache: dict      = {}
+_cibil_cache: dict      = {}
+_score_cache_lock       = threading.Lock()
+SCORE_CACHE_TTL         = 3600   # seconds
+
+def _get_cached_risk_score(application_id: str) -> dict:
+    now = time.time()
+    with _score_cache_lock:
+        entry = _score_cache.get(application_id)
+        if entry and (now - entry["ts"]) < SCORE_CACHE_TTL:
+            return entry["data"]
+    result = generate_risk_score(application_id)
+    with _score_cache_lock:
+        _score_cache[application_id] = {"data": result, "ts": now}
+    return result
+
+def _get_cached_cibil(application_id: str, csv_row) -> int:
+    with _score_cache_lock:
+        if application_id in _cibil_cache:
+            return _cibil_cache[application_id]
+    score = compute_cibil_score(csv_row) if csv_row is not None else 650
+    with _score_cache_lock:
+        _cibil_cache[application_id] = score
+    return score
+
+# =========================================================
 # CREDIT-SCORE BASED NOTE GENERATOR
 # =========================================================
 def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, risk_tier: str) -> str:
@@ -563,11 +592,11 @@ def get_decision_history(application_id: str):
         csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
         csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
 
-        # ── Credit scores for note generation ───────────────────
-        score_data  = generate_risk_score(application_id)
+        # ── Credit scores — cached, no recompute on repeat calls ──
+        score_data  = _get_cached_risk_score(application_id)
         risk_score  = score_data["risk_score"]
         risk_tier   = score_data["risk_tier"]
-        cibil_score = compute_cibil_score(csv_row) if csv_row is not None else 650
+        cibil_score = _get_cached_cibil(application_id, csv_row)
 
         # ── Resolve email recipient ──────────────────────────────
         email_to = ""
@@ -580,15 +609,15 @@ def get_decision_history(application_id: str):
         if not email_to:
             email_to = MAIL_TEST_RECIPIENT
 
-        # ── Query audit_trail ────────────────────────────────────
+        # ── Query audit_trail — single optimized query ───────────
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
             FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
+            WHERE application_id = %s
             ORDER BY timestamp DESC
-        """, (clean_id,))
+        """, (application_id,))
         rows = cursor.fetchall()
         cursor.close()
         db_pool.putconn(conn)
@@ -609,18 +638,20 @@ def get_decision_history(application_id: str):
                 real_audit_id = _audit_worker(payload)
                 latency_ms    = round((time.time() - history_start) * 1000, 2)
 
-                send_email(
-                    email_to,
-                    f"History Report – {application_id}",
-                    (
-                        f"Decision History for {application_id}\n"
-                        f"Applicant : {csv_applicant_name}\n"
-                        f"Decision  : {decision}\n"
-                        f"Analyst   : SYSTEM\n"
-                        f"Date      : {csv_application_date or 'N/A'}\n"
-                        f"Notes     : {status_note}\n"
-                    ),
+                # fire email in background — non-blocking
+                _auto_body = (
+                    f"Decision History for {application_id}\n"
+                    f"Applicant : {csv_applicant_name}\n"
+                    f"Decision  : {decision}\n"
+                    f"Analyst   : SYSTEM\n"
+                    f"Date      : {csv_application_date or 'N/A'}\n"
+                    f"Notes     : {status_note}\n"
                 )
+                threading.Thread(
+                    target=send_email,
+                    args=(email_to, f"History Report – {application_id}", _auto_body),
+                    daemon=True,
+                ).start()
 
                 return {
                     "history": [{
@@ -692,22 +723,21 @@ def get_decision_history(application_id: str):
 
         latency_ms = round((time.time() - history_start) * 1000, 2)
 
-        lines = [
-            f"Decision History Report – {application_id}",
-            f"Applicant : {csv_applicant_name}",
-            f"Total Records: {len(history)}",
-            "",
-        ]
-        for rec in history:
-            lines.append(
-                f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
-                f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
-            )
-        send_email(
-            email_to,
-            f"History Report – {application_id}",
-            "\n".join(lines),
-        )
+        # ── Email fires in background — non-blocking ────────────
+        def _send_history_email():
+            lines = [
+                f"Decision History Report – {application_id}",
+                f"Applicant : {csv_applicant_name}",
+                f"Total Records: {len(history)}",
+                "",
+            ]
+            for rec in history:
+                lines.append(
+                    f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
+                    f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
+                )
+            send_email(email_to, f"History Report – {application_id}", "\n".join(lines))
+        threading.Thread(target=_send_history_email, daemon=True).start()
 
         return {
             "history":      history,
