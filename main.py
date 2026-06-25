@@ -226,43 +226,61 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
+_decision_date_cache: dict = {}
+_decision_date_lock        = threading.Lock()
+DECISION_DATE_TTL          = 60   # seconds
+
 def get_decision_date(application_id: str) -> str:
+    now = time.time()
+    with _decision_date_lock:
+        entry = _decision_date_cache.get(application_id)
+        if entry and (now - entry["ts"]) < DECISION_DATE_TTL:
+            return entry["val"]
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT MAX(timestamp)
-            FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
-        """, (application_id.strip().upper(),))
+        cursor.execute(
+            "SELECT MAX(timestamp) FROM audit_trail WHERE application_id = %s",
+            (application_id,)
+        )
         row = cursor.fetchone()
         cursor.close()
         db_pool.putconn(conn)
-        if row and row[0]:
-            return row[0].isoformat()
-        return ""
+        val = row[0].isoformat() if row and row[0] else ""
     except Exception:
-        return ""
+        val = ""
+    with _decision_date_lock:
+        _decision_date_cache[application_id] = {"val": val, "ts": now}
+    return val
+
+_real_status_cache: dict = {}
+_real_status_lock          = threading.Lock()
+REAL_STATUS_TTL            = 60   # seconds
 
 def get_real_status(application_id: str, risk_tier: str) -> str:
+    now = time.time()
+    with _real_status_lock:
+        entry = _real_status_cache.get(application_id)
+        if entry and (now - entry["ts"]) < REAL_STATUS_TTL:
+            return entry["val"]
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT decision FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
-            ORDER BY timestamp DESC LIMIT 1
-        """, (application_id.strip().upper(),))
+        cursor.execute(
+            "SELECT decision FROM audit_trail WHERE application_id = %s ORDER BY timestamp DESC LIMIT 1",
+            (application_id,)
+        )
         row = cursor.fetchone()
         cursor.close()
         db_pool.putconn(conn)
-        if row and row[0]:
-            return {"APPROVE": "Approved", "REJECT": "Rejected", "REVIEW": "Under Review"}.get(
-                str(row[0]).upper(), get_status(risk_tier)
-            )
-        return get_status(risk_tier)
+        val = {"APPROVE": "Approved", "REJECT": "Rejected", "REVIEW": "Under Review"}.get(
+            str(row[0]).upper(), get_status(risk_tier)
+        ) if row and row[0] else get_status(risk_tier)
     except Exception:
-        return get_status(risk_tier)
+        val = get_status(risk_tier)
+    with _real_status_lock:
+        _real_status_cache[application_id] = {"val": val, "ts": now}
+    return val
 
 # =========================================================
 # CIBIL SCORE
@@ -433,6 +451,33 @@ def get_applications(limit: int = 10, offset: int = 0):
                 ((app_id, ex.submit(generate_risk_score, app_id)) for app_id in app_ids)
             }
 
+        # ── Batch fetch status + decision_date in 2 queries instead of N×2 ──
+        try:
+            conn   = get_db_connection()
+            cursor = conn.cursor()
+            placeholders = ",".join(["%s"] * len(app_ids))
+            cursor.execute(
+                f"SELECT application_id, decision, MAX(timestamp) "
+                f"FROM audit_trail WHERE application_id IN ({placeholders}) "
+                f"GROUP BY application_id, decision ORDER BY MAX(timestamp) DESC",
+                app_ids
+            )
+            db_rows = cursor.fetchall()
+            cursor.close()
+            db_pool.putconn(conn)
+
+            # Build lookup maps
+            _status_map  = {}
+            _date_map    = {}
+            for db_app_id, db_decision, db_ts in db_rows:
+                if db_app_id not in _status_map:
+                    _status_map[db_app_id] = {"APPROVE": "Approved", "REJECT": "Rejected",
+                        "REVIEW": "Under Review"}.get(str(db_decision).upper(), "Pending")
+                    _date_map[db_app_id]   = db_ts.isoformat() if db_ts else ""
+        except Exception:
+            _status_map = {}
+            _date_map   = {}
+
         applications = []
         for _, row in subset.iterrows():
             app_id         = safe_str(row.get("application_id", ""))
@@ -452,9 +497,9 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
                 "credit_score":       get_ml_credit_score(risk_score),
-                "application_status": get_real_status(app_id, risk_tier),
+                "application_status": _status_map.get(app_id, get_status(risk_tier)),
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
-                "decision_date":      get_decision_date(app_id),
+                "decision_date":      _date_map.get(app_id, ""),
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -858,44 +903,22 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
+        # Email fires in background — non-blocking so response returns fast
+        email_sent = True   # optimistic — thread handles actual sending
         if decision == "APPROVE":
-            email_sent = send_email(
-                recipient_email,
-                "Loan Application Approved",
-                f"""Hello {real_applicant_name},
-
-Congratulations! Your loan application {application_id} has been APPROVED.
-
-Regards,
-CreditSentinel Team"""
-            )
+            _subj = "Loan Application Approved"
+            _body = f"Hello {real_applicant_name},\n\nCongratulations! Your loan application {application_id} has been APPROVED.\n\nRegards,\nCreditSentinel Team"
         elif decision == "REJECT":
-            email_sent = send_email(
-                recipient_email,
-                "Loan Application Rejected",
-                f"""Hello {real_applicant_name},
-
-Your loan application {application_id} has been REJECTED.
-
-Reason: {notes}
-
-Regards,
-CreditSentinel Team"""
-            )
+            _subj = "Loan Application Rejected"
+            _body = f"Hello {real_applicant_name},\n\nYour loan application {application_id} has been REJECTED.\n\nReason: {notes}\n\nRegards,\nCreditSentinel Team"
         elif decision == "REVIEW":
-            email_sent = send_email(
-                recipient_email,
-                "Application Under Review",
-                f"""Hello {real_applicant_name},
-
-Your loan application {application_id} is currently UNDER REVIEW.
-Our team will contact you shortly.
-
-Regards,
-CreditSentinel Team"""
-            )
+            _subj = "Application Under Review"
+            _body = f"Hello {real_applicant_name},\n\nYour loan application {application_id} is currently UNDER REVIEW.\nOur team will contact you shortly.\n\nRegards,\nCreditSentinel Team"
         else:
+            _subj = _body = None
             email_sent = False
+        if _subj:
+            threading.Thread(target=send_email, args=(recipient_email, _subj, _body), daemon=True).start()
 
     except Exception as e:
         if conn:
@@ -916,6 +939,15 @@ CreditSentinel Team"""
     }
     audit_id   = await asyncio.create_task(fire_and_forget_audit(audit_payload))
     latency_ms = round((time.time() - decision_start) * 1000, 2)
+
+    # Invalidate all caches for this application so next read is fresh
+    _cid = application_id.strip().upper()
+    with _history_cache_lock:
+        _history_cache.pop(_cid, None)
+    with _decision_date_lock:
+        _decision_date_cache.pop(application_id, None)
+    with _real_status_lock:
+        _real_status_cache.pop(application_id, None)
 
     return {
         "application_id":    application_id,
