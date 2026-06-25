@@ -644,9 +644,11 @@ def get_decision_history(application_id: str):
                 return {"history": [], "email_report": True, "email_to": email_to, "latency_ms": 0}
 
         # ── Build history list ───────────────────────────────────
-        history = []
-        for row in rows:
-            # analyst_name: read directly from DB — whoever called process-decision
+        history    = []
+        now_ts     = time.time()
+
+        for i, row in enumerate(rows):
+            # analyst_name: read directly from DB
             raw_analyst  = row[5] if len(row) > 5 else None
             analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
             analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
@@ -664,17 +666,28 @@ def get_decision_history(application_id: str):
             db_decision = safe_str(row[1])
             smart_note  = get_credit_based_note(db_decision, cibil_score, risk_score, risk_tier)
 
+            # per-record latency_ms for latency trend chart:
+            # most recent record (i=0) -> elapsed request time
+            # older records -> gap between consecutive decisions in ms
+            if i == 0:
+                rec_latency_ms = round((now_ts - history_start) * 1000, 2)
+            elif ts_obj and rows[i - 1][3]:
+                rec_latency_ms = round(abs((rows[i - 1][3] - ts_obj).total_seconds() * 1000), 2)
+            else:
+                rec_latency_ms = 0.0
+
             history.append({
                 "audit_id":         row[0],
                 "decision":         db_decision,
                 "notes":            smart_note,
                 "timestamp":        ts_iso,
                 "applicant_name":   final_applicant_name,
-                "analyst_name":     analyst_name,        # real name from DB, not hardcoded
+                "analyst_name":     analyst_name,
                 "application_date": csv_application_date,
                 "decision_date":    ts_iso or csv_application_date,
                 "created_at":       csv_created_at,
                 "submitted_at":     csv_submitted_at,
+                "latency_ms":       rec_latency_ms,
             })
 
         latency_ms = round((time.time() - history_start) * 1000, 2)
