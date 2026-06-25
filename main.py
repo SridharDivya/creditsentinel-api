@@ -364,7 +364,6 @@ class DecisionRequest(BaseModel):
     decision:     str
     notes:        Optional[str] = ""
     analyst_name: str                   # required — who made the decision
-    timestamp:    Optional[str] = None
 
 # =========================================================
 # HEALTH
@@ -527,11 +526,35 @@ def get_application_detail(application_id: str):
 # =========================================================
 # HISTORY — GET /api/applications/{id}/history
 #
-# - analyst_name always populated (SYSTEM fallback, never blank)
-# - date range fields: application_date, decision_date, created_at, submitted_at
-# - email report fires silently every call; email_report always true in output
-# - latency_ms returned at top level (single field, no avg)
+# - analyst_name always "Divya" for every record
+# - notes auto-generated based on credit score per decision type
+# - email_to returned in response (same as process-decision)
+# - email report fires silently every call
+# - latency_ms returned at top level
 # =========================================================
+
+HISTORY_ANALYST = "Divya"
+
+def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, risk_tier: str) -> str:
+    """Generate a meaningful note based on credit score and decision."""
+    if decision in ("APPROVE", "APPROVED"):
+        if cibil_score >= 750:
+            return (f"Application approved. Excellent credit score of {cibil_score} with low risk profile "
+                    f"(score: {risk_score}). Applicant meets all creditworthiness criteria.")
+        else:
+            return (f"Application approved. Credit score {cibil_score} is satisfactory. "
+                    f"Risk tier: {risk_tier} (score: {risk_score}). Standard terms applied.")
+    elif decision in ("REJECT", "REJECTED"):
+        if cibil_score < 600:
+            return (f"Application rejected. Credit score {cibil_score} is below minimum threshold of 600. "
+                    f"High risk profile (score: {risk_score}). Applicant advised to improve credit standing.")
+        else:
+            return (f"Application rejected. Despite credit score of {cibil_score}, risk assessment indicates "
+                    f"{risk_tier.lower()} risk (score: {risk_score}). Additional risk factors identified.")
+    else:  # REVIEW
+        return (f"Application flagged for manual review. Credit score {cibil_score} requires further assessment. "
+                f"Risk tier: {risk_tier} (score: {risk_score}). Assigned to senior analyst for evaluation.")
+
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     history_start = time.time()
@@ -558,14 +581,22 @@ def get_decision_history(application_id: str):
         csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
         csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
 
+        # ── Credit score for note generation ────────────────────
+        score_data  = generate_risk_score(application_id)
+        risk_score  = score_data["risk_score"]
+        risk_tier   = score_data["risk_tier"]
+        cibil_score = compute_cibil_score(csv_row) if csv_row is not None else 650
+
         # ── Resolve email recipient from CSV ─────────────────────
-        report_recipient = ""
+        email_to = ""
         if csv_row is not None:
             for col in ["email", "email_address", "applicant_email", "mail"]:
                 v = safe_str(csv_row.get(col, ""))
                 if v.strip():
-                    report_recipient = v.strip()
+                    email_to = v.strip()
                     break
+        if not email_to:
+            email_to = MAIL_TEST_RECIPIENT
 
         # ── Query audit_trail ────────────────────────────────────
         conn   = get_db_connection()
@@ -583,32 +614,27 @@ def get_decision_history(application_id: str):
         # ── Auto-insert if no history exists ─────────────────────
         if not rows:
             try:
-                score_data  = generate_risk_score(application_id)
-                risk_tier   = score_data["risk_tier"]
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
-                status_note = (
-                    f"Credit profile {risk_tier.lower()} risk — "
-                    f"auto decision based on model score {score_data['risk_score']}"
-                )
+                status_note = get_credit_based_note(decision, cibil_score, risk_score, risk_tier)
+
                 payload = {
                     "application_id": application_id,
                     "decision":       decision,
                     "notes":          status_note,
                     "applicant_name": csv_applicant_name,
-                    "analyst_name":   "SYSTEM",
+                    "analyst_name":   HISTORY_ANALYST,
                 }
                 real_audit_id = _audit_worker(payload)
                 latency_ms    = round((time.time() - history_start) * 1000, 2)
 
-                # send email silently
                 send_email(
-                    report_recipient or MAIL_TEST_RECIPIENT,
+                    email_to,
                     f"History Report – {application_id}",
                     (
                         f"Decision History for {application_id}\n"
                         f"Applicant : {csv_applicant_name}\n"
                         f"Decision  : {decision}\n"
-                        f"Analyst   : SYSTEM\n"
+                        f"Analyst   : {HISTORY_ANALYST}\n"
                         f"Date      : {csv_application_date or 'N/A'}\n"
                         f"Notes     : {status_note}\n"
                     ),
@@ -621,26 +647,23 @@ def get_decision_history(application_id: str):
                         "notes":            status_note,
                         "timestamp":        csv_application_date or datetime.now().isoformat(),
                         "applicant_name":   csv_applicant_name,
-                        "analyst_name":     "SYSTEM",
+                        "analyst_name":     HISTORY_ANALYST,
                         "application_date": csv_application_date,
                         "decision_date":    csv_application_date,
                         "created_at":       csv_created_at,
                         "submitted_at":     csv_submitted_at,
                     }],
                     "email_report": True,
+                    "email_to":     email_to,
                     "latency_ms":   latency_ms,
                 }
             except Exception as insert_err:
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
-                return {"history": [], "email_report": True, "latency_ms": 0}
+                return {"history": [], "email_report": True, "email_to": email_to, "latency_ms": 0}
 
         # ── Build history list ───────────────────────────────────
         history = []
         for row in rows:
-            raw_analyst  = row[5] if len(row) > 5 else None
-            analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
-            analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
-
             db_appl_val  = row[4]
             db_appl_str  = str(db_appl_val).strip() if db_appl_val is not None else ""
             final_applicant_name = (
@@ -649,16 +672,20 @@ def get_decision_history(application_id: str):
                 else safe_str(db_appl_val)
             )
 
-            ts_obj = row[3]
-            ts_iso = ts_obj.isoformat() if ts_obj else None
+            ts_obj     = row[3]
+            ts_iso     = ts_obj.isoformat() if ts_obj else None
+            db_decision = safe_str(row[1])
+
+            # regenerate credit-score-based note for each record
+            smart_note = get_credit_based_note(db_decision, cibil_score, risk_score, risk_tier)
 
             history.append({
                 "audit_id":         row[0],
-                "decision":         row[1],
-                "notes":            row[2],
+                "decision":         db_decision,
+                "notes":            smart_note,
                 "timestamp":        ts_iso,
                 "applicant_name":   final_applicant_name,
-                "analyst_name":     analyst_name,
+                "analyst_name":     HISTORY_ANALYST,
                 "application_date": csv_application_date,
                 "decision_date":    ts_iso or csv_application_date,
                 "created_at":       csv_created_at,
@@ -680,7 +707,7 @@ def get_decision_history(application_id: str):
                 f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
             )
         send_email(
-            report_recipient or MAIL_TEST_RECIPIENT,
+            email_to,
             f"History Report – {application_id}",
             "\n".join(lines),
         )
@@ -688,6 +715,7 @@ def get_decision_history(application_id: str):
         return {
             "history":      history,
             "email_report": True,
+            "email_to":     email_to,
             "latency_ms":   latency_ms,
         }
 
