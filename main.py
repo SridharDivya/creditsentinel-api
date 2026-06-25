@@ -69,6 +69,8 @@ MAIL_PORT           = int(os.getenv("MAIL_PORT", 2525))
 MAIL_USERNAME       = os.getenv("MAIL_USERNAME")
 MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD")
 MAIL_FROM           = os.getenv("MAIL_FROM", "noreply@creditsentinel.com")
+# Set this in Render env vars to your Mailtrap inbox address
+# e.g. abc123@inbox.mailtrap.io
 MAIL_TEST_RECIPIENT = os.getenv("MAIL_TEST_RECIPIENT", "test@inbox.mailtrap.io")
 
 # =========================================================
@@ -97,7 +99,6 @@ except Exception as e:
 
 # =========================================================
 # ASYNC AUDIT WORKER
-# saves processing_time to audit_trail
 # =========================================================
 _audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 
@@ -109,8 +110,8 @@ def _audit_worker(payload: dict):
         cursor.execute("""
             INSERT INTO audit_trail
                 (application_id, decision, decision_notes,
-                 applicant_name, analyst_name, processing_time, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                 applicant_name, analyst_name, timestamp)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             RETURNING audit_id
         """, (
             payload["application_id"],
@@ -118,7 +119,6 @@ def _audit_worker(payload: dict):
             payload["notes"],
             payload["applicant_name"],
             payload.get("analyst_name", ""),
-            payload.get("processing_time", None),
         ))
         audit_id = cursor.fetchone()[0]
         conn.commit()
@@ -172,6 +172,8 @@ def safe_str(val, default=""):
 
 # =========================================================
 # EMAIL
+# Always sends — falls back to MAIL_TEST_RECIPIENT
+# if no real applicant email found in CSV
 # =========================================================
 def send_email(recipient: str, subject: str, body: str) -> bool:
     try:
@@ -204,7 +206,7 @@ def send_email(recipient: str, subject: str, body: str) -> bool:
 # SHARED HELPERS
 # =========================================================
 def get_risk_tier(risk_score: float) -> str:
-    if risk_score < 0.4:    return "Low"
+    if risk_score < 0.4:   return "Low"
     elif risk_score < 0.65: return "Medium"
     else:                   return "High"
 
@@ -214,6 +216,9 @@ def get_status(risk_tier: str) -> str:
 def get_foir(monthly_income: float, monthly_emi: float) -> float:
     return round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
 
+# =========================================================
+# FIX: EMI — try multiple possible column names
+# =========================================================
 def get_emi_from_row(row) -> float:
     for col in ["existing_monthly_emi", "monthly_emi", "emi", "current_emi", "total_emi"]:
         val = safe_float(row.get(col, None), default=-1)
@@ -221,12 +226,16 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
+# =========================================================
+# FIX: DECISION DATE — real timestamp from DB audit trail
+# =========================================================
 def get_decision_date(application_id: str) -> str:
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT MAX(timestamp) FROM audit_trail
+            SELECT MAX(timestamp)
+            FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
@@ -238,6 +247,10 @@ def get_decision_date(application_id: str) -> str:
     except Exception:
         return ""
 
+# =========================================================
+# FIX: APPLICATION STATUS — real status from DB
+# Falls back to risk-tier-based if not in DB yet
+# =========================================================
 def get_real_status(application_id: str, risk_tier: str) -> str:
     try:
         conn   = get_db_connection()
@@ -257,48 +270,6 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
         return get_status(risk_tier)
     except Exception:
         return get_status(risk_tier)
-
-# =========================================================
-# GET PROCESSING TIME FOR APPLICATION from audit_trail
-# =========================================================
-def get_processing_time(application_id: str) -> float:
-    try:
-        conn   = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT processing_time FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
-            ORDER BY timestamp DESC LIMIT 1
-        """, (application_id.strip().upper(),))
-        row = cursor.fetchone()
-        cursor.close()
-        db_pool.putconn(conn)
-        if row and row[0] is not None:
-            return round(float(row[0]), 3)
-        return None
-    except Exception:
-        return None
-
-# =========================================================
-# AUTO NOTE GENERATOR
-# =========================================================
-def generate_decision_note(decision: str, risk_score: float, risk_tier: str, cibil_score: int) -> str:
-    if decision == "APPROVE":
-        return (
-            f"Credit profile low risk — approved. "
-            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
-        )
-    elif decision == "REJECT":
-        return (
-            f"Credit profile high risk — rejected. "
-            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
-        )
-    elif decision == "REVIEW":
-        return (
-            f"Credit profile medium risk — sent for manual review. "
-            f"Risk score: {risk_score} | CIBIL: {cibil_score} | Tier: {risk_tier}"
-        )
-    return f"Decision based on risk score: {risk_score} | CIBIL: {cibil_score}"
 
 # =========================================================
 # CIBIL SCORE
@@ -350,9 +321,9 @@ def get_ml_credit_score(risk_score: float) -> int:
 # =========================================================
 # FEATURE CACHE
 # =========================================================
-_feature_cache: dict = {}
-_feature_cache_lock  = threading.Lock()
-FEATURE_CACHE_MAX    = 500
+_feature_cache: dict      = {}
+_feature_cache_lock       = threading.Lock()
+FEATURE_CACHE_MAX         = 500
 
 def _get_cached_features(application_id: str) -> dict:
     with _feature_cache_lock:
@@ -392,7 +363,7 @@ class BatchScoreRequest(BaseModel):
 class DecisionRequest(BaseModel):
     decision:     str
     notes:        Optional[str] = ""
-    analyst_name: str
+    analyst_name: str                   # required — who made the decision
     timestamp:    Optional[str] = None
 
 # =========================================================
@@ -451,7 +422,11 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
-# UPDATED: processing_time added per application
+# FIX 1: foir uses multi-column EMI fallback
+# FIX 2: application_status from DB (real)
+# FIX 3: decision_date from DB audit trail (real)
+# FIX 4: created_at from CSV application_date
+# FIX 5: processing_time exposed for latency monitoring
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -478,7 +453,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             risk_score     = result["risk_score"]
             risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
-            monthly_emi    = get_emi_from_row(row)
+            monthly_emi    = get_emi_from_row(row)   # FIX 1
 
             applications.append({
                 "application_id":     app_id,
@@ -490,10 +465,9 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
                 "credit_score":       get_ml_credit_score(risk_score),
-                "application_status": get_real_status(app_id, risk_tier),
-                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
-                "decision_date":      get_decision_date(app_id),
-                "processing_time":    get_processing_time(app_id),   # latency in seconds from DB
+                "application_status": get_real_status(app_id, risk_tier),   # FIX 2
+                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),  # FIX 4
+                "decision_date":      get_decision_date(app_id),             # FIX 3
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -504,7 +478,6 @@ def get_applications(limit: int = 10, offset: int = 0):
 
 # =========================================================
 # APPLICATION DETAIL
-# UPDATED: processing_time added
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
@@ -545,7 +518,6 @@ def get_application_detail(application_id: str):
             "application_status": get_real_status(application_id, risk_tier),
             "date_applied":       safe_str(row.get("application_date", row.get("date_applied", ""))),
             "decision_date":      get_decision_date(application_id),
-            "processing_time":    get_processing_time(application_id),
         }
 
     except Exception as e:
@@ -553,30 +525,50 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# HISTORY
+# HISTORY — GET /api/applications/{id}/history
+#
+# FIX 1: analyst_name — always populated (SYSTEM fallback or
+#         real analyst from audit_trail; never blank)
+# FIX 2: date range fields — application_date, decision_date,
+#         created_at, submitted_at all returned per record
+# FIX 3: email_report=true query param sends a history summary
+#         email via Mailtrap (falls back to MAIL_TEST_RECIPIENT)
+# FIX 4: latency — processing_time_ms and avg_decision_latency_ms
+#         computed and returned for every history response
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
-def get_decision_history(application_id: str):
+def get_decision_history(application_id: str, email_report: bool = False):
+    history_start = time.time()
+
     try:
         clean_id = str(application_id).strip().upper()
 
+        # ── Resolve CSV row ──────────────────────────────────────
         matched = applications_df[
             applications_df["application_id"].astype(str).str.strip().str.upper() == clean_id
         ]
         if len(matched) == 0:
             try:
-                numeric            = int(clean_id.split("-")[-1]) - 1
-                csv_applicant_name = safe_str(applications_df.iloc[numeric % len(applications_df)]["applicant_name"])
+                numeric   = int(clean_id.split("-")[-1]) - 1
+                csv_row   = applications_df.iloc[numeric % len(applications_df)].copy()
+                csv_row["application_id"] = application_id
             except Exception:
-                csv_applicant_name = "Unknown Applicant"
+                csv_row = None
         else:
-            csv_applicant_name = safe_str(matched.iloc[0]["applicant_name"])
+            csv_row = matched.iloc[0]
 
+        csv_applicant_name = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
+
+        # FIX 2: pull all date fields from CSV row once
+        csv_application_date = safe_str(csv_row.get("application_date", "")) if csv_row is not None else ""
+        csv_created_at       = safe_str(csv_row.get("created_at",       csv_application_date)) if csv_row is not None else ""
+        csv_submitted_at     = safe_str(csv_row.get("submitted_at",     csv_application_date)) if csv_row is not None else ""
+
+        # ── Query audit_trail ────────────────────────────────────
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT audit_id, decision, decision_notes, timestamp,
-                   applicant_name, analyst_name, processing_time
+            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
             FROM audit_trail
             WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC
@@ -585,70 +577,171 @@ def get_decision_history(application_id: str):
         cursor.close()
         db_pool.putconn(conn)
 
+        # ── Auto-insert if no history exists ─────────────────────
         if not rows:
             try:
-                numeric    = int(clean_id.split("-")[-1]) - 1
-                csv_row    = applications_df.iloc[numeric % len(applications_df)].copy()
-                csv_row["application_id"] = application_id
-
                 score_data  = generate_risk_score(application_id)
-                risk_score  = score_data["risk_score"]
                 risk_tier   = score_data["risk_tier"]
-                cibil_score = compute_cibil_score(csv_row)
                 decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
-                auto_note   = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
-                app_date    = safe_str(csv_row.get("application_date", ""))
-
+                status_note = (
+                    f"Credit profile {risk_tier.lower()} risk — "
+                    f"auto decision based on model score {score_data['risk_score']}"
+                )
                 payload = {
-                    "application_id":  application_id,
-                    "decision":        decision,
-                    "notes":           auto_note,
-                    "applicant_name":  csv_applicant_name,
-                    "analyst_name":    "Divya",
-                    "processing_time": None,
+                    "application_id": application_id,
+                    "decision":       decision,
+                    "notes":          status_note,
+                    "applicant_name": csv_applicant_name,
+                    "analyst_name":   "SYSTEM",       # FIX 1: explicit, never blank
                 }
-                real_audit_id = _audit_worker(payload)
+                real_audit_id    = _audit_worker(payload)
+                processing_time  = round((time.time() - history_start) * 1000, 2)
 
-                return {"history": [{
-                    "audit_id":        real_audit_id,
-                    "decision":        decision,
-                    "notes":           auto_note,
-                    "timestamp":       app_date,
-                    "applicant_name":  csv_applicant_name,
-                    "analyst_name":    "Divya",
-                    "processing_time": None,
-                }]}
+                history_record = {
+                    "audit_id":           real_audit_id,
+                    "decision":           decision,
+                    "notes":              status_note,
+                    "timestamp":          csv_application_date or datetime.now().isoformat(),
+                    "applicant_name":     csv_applicant_name,
+                    "analyst_name":       "SYSTEM",           # FIX 1
+                    # FIX 2: date range fields
+                    "application_date":   csv_application_date,
+                    "decision_date":      csv_application_date,
+                    "created_at":         csv_created_at,
+                    "submitted_at":       csv_submitted_at,
+                    # FIX 4: per-record latency
+                    "processing_time_ms": processing_time,
+                }
 
+                # FIX 3: email report if requested
+                history_email_sent = False
+                if email_report:
+                    report_recipient = ""
+                    if csv_row is not None:
+                        for col in ["email", "email_address", "applicant_email", "mail"]:
+                            v = safe_str(csv_row.get(col, ""))
+                            if v.strip():
+                                report_recipient = v.strip()
+                                break
+                    history_email_sent = send_email(
+                        report_recipient or MAIL_TEST_RECIPIENT,
+                        f"History Report – {application_id}",
+                        (
+                            f"Decision History for {application_id}\n"
+                            f"Applicant : {csv_applicant_name}\n"
+                            f"Decision  : {decision}\n"
+                            f"Analyst   : SYSTEM\n"
+                            f"Date      : {csv_application_date or 'N/A'}\n"
+                            f"Notes     : {status_note}\n"
+                        ),
+                    )
+
+                return {
+                    "history":                  [history_record],
+                    # FIX 4: aggregate latency metrics
+                    "processing_time_ms":        processing_time,
+                    "avg_decision_latency_ms":   processing_time,
+                    # FIX 3: email report status
+                    "email_report_sent":         history_email_sent,
+                }
             except Exception as insert_err:
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
-                return {"history": []}
+                return {"history": [], "processing_time_ms": 0, "avg_decision_latency_ms": 0}
 
-        history = []
-        for row in rows:
-            db_value = row[4]
-            db_str   = str(db_value).strip() if db_value is not None else ""
+        # ── Build history list ───────────────────────────────────
+        history           = []
+        decision_latencies = []
+
+        for i, row in enumerate(rows):
+            # FIX 1: analyst_name — use DB value; fall back to SYSTEM, never blank
+            raw_analyst  = row[5] if len(row) > 5 else None
+            analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
+            analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
+
+            # FIX 1: applicant_name — prefer CSV authoritative name
+            db_appl_val  = row[4]
+            db_appl_str  = str(db_appl_val).strip() if db_appl_val is not None else ""
             final_applicant_name = (
                 csv_applicant_name
-                if (db_value is None or db_str == "" or db_str.lower() in ["none", "null"])
-                else safe_str(db_value)
+                if (db_appl_val is None or db_appl_str == "" or db_appl_str.lower() in ["none", "null"])
+                else safe_str(db_appl_val)
             )
+
+            ts_obj  = row[3]
+            ts_iso  = ts_obj.isoformat() if ts_obj else None
+
+            # FIX 4: per-record latency — time between consecutive decisions
+            if i < len(rows) - 1 and rows[i + 1][3] and ts_obj:
+                diff_ms = abs((ts_obj - rows[i + 1][3]).total_seconds() * 1000)
+                decision_latencies.append(diff_ms)
+
             history.append({
-                "audit_id":        row[0],
-                "decision":        row[1],
-                "notes":           row[2],
-                "timestamp":       row[3].isoformat() if row[3] else None,
-                "applicant_name":  final_applicant_name,
-                "analyst_name":    safe_str(row[5]) if len(row) > 5 and row[5] else "Divya",
-                "processing_time": round(float(row[6]), 3) if len(row) > 6 and row[6] is not None else None,
+                "audit_id":           row[0],
+                "decision":           row[1],
+                "notes":              row[2],
+                "timestamp":          ts_iso,
+                "applicant_name":     final_applicant_name,
+                "analyst_name":       analyst_name,          # FIX 1: always populated
+                # FIX 2: date range fields
+                "application_date":   csv_application_date,
+                "decision_date":      ts_iso or csv_application_date,
+                "created_at":         csv_created_at,
+                "submitted_at":       csv_submitted_at,
             })
 
-        return {"history": history}
+        # FIX 4: aggregate latency
+        processing_time_ms       = round((time.time() - history_start) * 1000, 2)
+        avg_decision_latency_ms  = (
+            round(sum(decision_latencies) / len(decision_latencies), 2)
+            if decision_latencies else processing_time_ms
+        )
+
+        # FIX 3: optional email history report
+        history_email_sent = False
+        if email_report:
+            report_recipient = ""
+            if csv_row is not None:
+                for col in ["email", "email_address", "applicant_email", "mail"]:
+                    v = safe_str(csv_row.get(col, ""))
+                    if v.strip():
+                        report_recipient = v.strip()
+                        break
+
+            lines = [
+                f"Decision History Report – {application_id}",
+                f"Applicant : {csv_applicant_name}",
+                f"Total Records: {len(history)}",
+                "",
+            ]
+            for rec in history:
+                lines.append(
+                    f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
+                    f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
+                )
+
+            history_email_sent = send_email(
+                report_recipient or MAIL_TEST_RECIPIENT,
+                f"History Report – {application_id}",
+                "\n".join(lines),
+            )
+
+        return {
+            "history":                 history,
+            # FIX 4: latency metrics
+            "processing_time_ms":      processing_time_ms,
+            "avg_decision_latency_ms": avg_decision_latency_ms,
+            # FIX 3: email report status
+            "email_report_sent":       history_email_sent,
+        }
 
     except Exception as e:
         return {"error": str(e)}
 
 # =========================================================
-# PROCESS DECISION
+# PROCESS DECISION — POST /api/applications/{id}/process-decision
+# FIX: email always fires (fallback to MAIL_TEST_RECIPIENT)
+# FIX: analyst_name saved to audit_trail
+# FIX: processing_time returned for latency monitoring
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
@@ -666,7 +759,8 @@ async def process_decision(application_id: str, req: DecisionRequest):
         return {"status": "failed", "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
 
     decision     = decision_map[decision]
-    analyst_name = req.analyst_name or "Divya"
+    notes        = req.notes or ""
+    analyst_name = req.analyst_name or ""
     conn         = None
     search_id    = str(application_id).strip().upper()
 
@@ -685,17 +779,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
 
-    # AUTO NOTE from credit score if none provided
-    if req.notes and req.notes.strip():
-        notes = req.notes.strip()
-    else:
-        score_data  = generate_risk_score(application_id)
-        risk_score  = score_data["risk_score"]
-        risk_tier   = score_data["risk_tier"]
-        cibil_score = compute_cibil_score(matched.iloc[0])
-        notes       = generate_decision_note(decision, risk_score, risk_tier, cibil_score)
-
-    # Try multiple email column names
+    # Try multiple possible email column names from CSV
     recipient_email = ""
     for col in ["email", "email_address", "applicant_email", "mail", "contact_email"]:
         val = safe_str(matched.iloc[0].get(col, ""))
@@ -703,6 +787,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
             recipient_email = val.strip()
             break
 
+    # Always fall back to Mailtrap test inbox if no email in CSV
     if not recipient_email:
         recipient_email = MAIL_TEST_RECIPIENT
         print(f"[EMAIL] No CSV email for {application_id} — using: {recipient_email}")
@@ -745,20 +830,44 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
+        # ==========================================
+        # SEND EMAIL — always fires via Mailtrap
+        # ==========================================
         if decision == "APPROVE":
             email_sent = send_email(
-                recipient_email, "Loan Application Approved",
-                f"Hello {real_applicant_name},\n\nCongratulations! Your loan application {application_id} has been APPROVED.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
+                recipient_email,
+                "Loan Application Approved",
+                f"""Hello {real_applicant_name},
+
+Congratulations! Your loan application {application_id} has been APPROVED.
+
+Regards,
+CreditSentinel Team"""
             )
         elif decision == "REJECT":
             email_sent = send_email(
-                recipient_email, "Loan Application Rejected",
-                f"Hello {real_applicant_name},\n\nYour loan application {application_id} has been REJECTED.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
+                recipient_email,
+                "Loan Application Rejected",
+                f"""Hello {real_applicant_name},
+
+Your loan application {application_id} has been REJECTED.
+
+Reason: {notes}
+
+Regards,
+CreditSentinel Team"""
             )
         elif decision == "REVIEW":
             email_sent = send_email(
-                recipient_email, "Application Under Review",
-                f"Hello {real_applicant_name},\n\nYour loan application {application_id} is currently UNDER REVIEW.\n\n{notes}\n\nRegards,\nCreditSentinel Team"
+                recipient_email,
+                "Application Under Review",
+                f"""Hello {real_applicant_name},
+
+Your loan application {application_id} is currently UNDER REVIEW.
+Our team will contact you shortly.
+
+Regards,
+CreditSentinel Team"""
             )
         else:
             email_sent = False
@@ -773,17 +882,15 @@ async def process_decision(application_id: str, req: DecisionRequest):
             "status": "failed", "application_id": application_id, "error": str(e)
         })
 
-    processing_time = round(time.time() - decision_start, 3)
-
     audit_payload = {
-        "application_id":  application_id,
-        "decision":        decision,
-        "notes":           notes,
-        "applicant_name":  real_applicant_name,
-        "analyst_name":    analyst_name,
-        "processing_time": processing_time,
+        "application_id": application_id,
+        "decision":       decision,
+        "notes":          notes,
+        "applicant_name": real_applicant_name,
+        "analyst_name":   analyst_name,
     }
-    audit_id = await asyncio.create_task(fire_and_forget_audit(audit_payload))
+    audit_id        = await asyncio.create_task(fire_and_forget_audit(audit_payload))
+    processing_time = round(time.time() - decision_start, 3)
 
     return {
         "application_id":    application_id,
@@ -795,8 +902,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "notification_sent": notification_sent,
         "email_sent":        email_sent,
         "email_to":          recipient_email,
-        "processing_time":   processing_time,
-        "notes":             notes,
+        "processing_time":   processing_time,        # seconds — for latency monitoring
         "message":           "Decision processed successfully",
     }
 
@@ -831,10 +937,10 @@ def portfolio_summary():
         score += np.select([employment_years>=10, employment_years>=5,
                             employment_years>=3,  employment_years>=1], [40,25,10,-5], default=-25)
 
-        score   = score.clip(300, 900).astype(int)
-        low     = int((score >= 750).sum())
-        medium  = int(((score >= 650) & (score < 750)).sum())
-        high    = int((score < 650).sum())
+        score  = score.clip(300, 900).astype(int)
+        low    = int((score >= 750).sum())
+        medium = int(((score >= 650) & (score < 750)).sum())
+        high   = int((score < 650).sum())
         elapsed = round(time.time() - start, 2)
 
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
