@@ -115,8 +115,9 @@ def _audit_worker(payload: dict):
         cursor.execute("""
             INSERT INTO audit_trail
                 (application_id, decision, decision_notes,
-                 applicant_name, analyst_name, timestamp)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                 applicant_name, analyst_name, timestamp,
+                 latency_ms, email_sent)
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s)
             RETURNING audit_id
         """, (
             payload["application_id"],
@@ -124,6 +125,8 @@ def _audit_worker(payload: dict):
             payload["notes"],
             payload["applicant_name"],
             payload.get("analyst_name", ""),
+            payload.get("latency_ms", 0),
+            payload.get("email_sent", False),
         ))
         audit_id = cursor.fetchone()[0]
         conn.commit()
@@ -935,7 +938,9 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "decision":       decision,
         "notes":          notes,
         "applicant_name": real_applicant_name,
-        "analyst_name":   analyst_name,   # saved exactly as sent from frontend
+        "analyst_name":   analyst_name,
+        "latency_ms":     round((time.time() - decision_start) * 1000, 2),
+        "email_sent":     True,
     }
     audit_id   = await asyncio.create_task(fire_and_forget_audit(audit_payload))
     latency_ms = round((time.time() - decision_start) * 1000, 2)
