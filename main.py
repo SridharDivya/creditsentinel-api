@@ -527,17 +527,13 @@ def get_application_detail(application_id: str):
 # =========================================================
 # HISTORY — GET /api/applications/{id}/history
 #
-# FIX 1: analyst_name — always populated (SYSTEM fallback or
-#         real analyst from audit_trail; never blank)
-# FIX 2: date range fields — application_date, decision_date,
-#         created_at, submitted_at all returned per record
-# FIX 3: email_report=true query param sends a history summary
-#         email via Mailtrap (falls back to MAIL_TEST_RECIPIENT)
-# FIX 4: latency — processing_time_ms and avg_decision_latency_ms
-#         computed and returned for every history response
+# - analyst_name always populated (SYSTEM fallback, never blank)
+# - date range fields: application_date, decision_date, created_at, submitted_at
+# - email report fires silently every call; email_report always true in output
+# - latency_ms returned at top level (single field, no avg)
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
-def get_decision_history(application_id: str, email_report: bool = False):
+def get_decision_history(application_id: str):
     history_start = time.time()
 
     try:
@@ -557,12 +553,19 @@ def get_decision_history(application_id: str, email_report: bool = False):
         else:
             csv_row = matched.iloc[0]
 
-        csv_applicant_name = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
-
-        # FIX 2: pull all date fields from CSV row once
+        csv_applicant_name   = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
         csv_application_date = safe_str(csv_row.get("application_date", "")) if csv_row is not None else ""
-        csv_created_at       = safe_str(csv_row.get("created_at",       csv_application_date)) if csv_row is not None else ""
-        csv_submitted_at     = safe_str(csv_row.get("submitted_at",     csv_application_date)) if csv_row is not None else ""
+        csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
+        csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
+
+        # ── Resolve email recipient from CSV ─────────────────────
+        report_recipient = ""
+        if csv_row is not None:
+            for col in ["email", "email_address", "applicant_email", "mail"]:
+                v = safe_str(csv_row.get(col, ""))
+                if v.strip():
+                    report_recipient = v.strip()
+                    break
 
         # ── Query audit_trail ────────────────────────────────────
         conn   = get_db_connection()
@@ -592,73 +595,52 @@ def get_decision_history(application_id: str, email_report: bool = False):
                     "decision":       decision,
                     "notes":          status_note,
                     "applicant_name": csv_applicant_name,
-                    "analyst_name":   "SYSTEM",       # FIX 1: explicit, never blank
+                    "analyst_name":   "SYSTEM",
                 }
-                real_audit_id    = _audit_worker(payload)
-                processing_time  = round((time.time() - history_start) * 1000, 2)
+                real_audit_id = _audit_worker(payload)
+                latency_ms    = round((time.time() - history_start) * 1000, 2)
 
-                history_record = {
-                    "audit_id":           real_audit_id,
-                    "decision":           decision,
-                    "notes":              status_note,
-                    "timestamp":          csv_application_date or datetime.now().isoformat(),
-                    "applicant_name":     csv_applicant_name,
-                    "analyst_name":       "SYSTEM",           # FIX 1
-                    # FIX 2: date range fields
-                    "application_date":   csv_application_date,
-                    "decision_date":      csv_application_date,
-                    "created_at":         csv_created_at,
-                    "submitted_at":       csv_submitted_at,
-                    # FIX 4: per-record latency
-                    "processing_time_ms": processing_time,
-                }
-
-                # FIX 3: email report if requested
-                history_email_sent = False
-                if email_report:
-                    report_recipient = ""
-                    if csv_row is not None:
-                        for col in ["email", "email_address", "applicant_email", "mail"]:
-                            v = safe_str(csv_row.get(col, ""))
-                            if v.strip():
-                                report_recipient = v.strip()
-                                break
-                    history_email_sent = send_email(
-                        report_recipient or MAIL_TEST_RECIPIENT,
-                        f"History Report – {application_id}",
-                        (
-                            f"Decision History for {application_id}\n"
-                            f"Applicant : {csv_applicant_name}\n"
-                            f"Decision  : {decision}\n"
-                            f"Analyst   : SYSTEM\n"
-                            f"Date      : {csv_application_date or 'N/A'}\n"
-                            f"Notes     : {status_note}\n"
-                        ),
-                    )
+                # send email silently
+                send_email(
+                    report_recipient or MAIL_TEST_RECIPIENT,
+                    f"History Report – {application_id}",
+                    (
+                        f"Decision History for {application_id}\n"
+                        f"Applicant : {csv_applicant_name}\n"
+                        f"Decision  : {decision}\n"
+                        f"Analyst   : SYSTEM\n"
+                        f"Date      : {csv_application_date or 'N/A'}\n"
+                        f"Notes     : {status_note}\n"
+                    ),
+                )
 
                 return {
-                    "history":                  [history_record],
-                    # FIX 4: aggregate latency metrics
-                    "processing_time_ms":        processing_time,
-                    "avg_decision_latency_ms":   processing_time,
-                    # FIX 3: email report status
-                    "email_report_sent":         history_email_sent,
+                    "history": [{
+                        "audit_id":         real_audit_id,
+                        "decision":         decision,
+                        "notes":            status_note,
+                        "timestamp":        csv_application_date or datetime.now().isoformat(),
+                        "applicant_name":   csv_applicant_name,
+                        "analyst_name":     "SYSTEM",
+                        "application_date": csv_application_date,
+                        "decision_date":    csv_application_date,
+                        "created_at":       csv_created_at,
+                        "submitted_at":     csv_submitted_at,
+                    }],
+                    "email_report": True,
+                    "latency_ms":   latency_ms,
                 }
             except Exception as insert_err:
                 print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
-                return {"history": [], "processing_time_ms": 0, "avg_decision_latency_ms": 0}
+                return {"history": [], "email_report": True, "latency_ms": 0}
 
         # ── Build history list ───────────────────────────────────
-        history           = []
-        decision_latencies = []
-
-        for i, row in enumerate(rows):
-            # FIX 1: analyst_name — use DB value; fall back to SYSTEM, never blank
+        history = []
+        for row in rows:
             raw_analyst  = row[5] if len(row) > 5 else None
             analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
             analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
 
-            # FIX 1: applicant_name — prefer CSV authoritative name
             db_appl_val  = row[4]
             db_appl_str  = str(db_appl_val).strip() if db_appl_val is not None else ""
             final_applicant_name = (
@@ -667,71 +649,46 @@ def get_decision_history(application_id: str, email_report: bool = False):
                 else safe_str(db_appl_val)
             )
 
-            ts_obj  = row[3]
-            ts_iso  = ts_obj.isoformat() if ts_obj else None
-
-            # FIX 4: per-record latency — time between consecutive decisions
-            if i < len(rows) - 1 and rows[i + 1][3] and ts_obj:
-                diff_ms = abs((ts_obj - rows[i + 1][3]).total_seconds() * 1000)
-                decision_latencies.append(diff_ms)
+            ts_obj = row[3]
+            ts_iso = ts_obj.isoformat() if ts_obj else None
 
             history.append({
-                "audit_id":           row[0],
-                "decision":           row[1],
-                "notes":              row[2],
-                "timestamp":          ts_iso,
-                "applicant_name":     final_applicant_name,
-                "analyst_name":       analyst_name,          # FIX 1: always populated
-                # FIX 2: date range fields
-                "application_date":   csv_application_date,
-                "decision_date":      ts_iso or csv_application_date,
-                "created_at":         csv_created_at,
-                "submitted_at":       csv_submitted_at,
+                "audit_id":         row[0],
+                "decision":         row[1],
+                "notes":            row[2],
+                "timestamp":        ts_iso,
+                "applicant_name":   final_applicant_name,
+                "analyst_name":     analyst_name,
+                "application_date": csv_application_date,
+                "decision_date":    ts_iso or csv_application_date,
+                "created_at":       csv_created_at,
+                "submitted_at":     csv_submitted_at,
             })
 
-        # FIX 4: aggregate latency
-        processing_time_ms       = round((time.time() - history_start) * 1000, 2)
-        avg_decision_latency_ms  = (
-            round(sum(decision_latencies) / len(decision_latencies), 2)
-            if decision_latencies else processing_time_ms
+        latency_ms = round((time.time() - history_start) * 1000, 2)
+
+        # send email report silently
+        lines = [
+            f"Decision History Report – {application_id}",
+            f"Applicant : {csv_applicant_name}",
+            f"Total Records: {len(history)}",
+            "",
+        ]
+        for rec in history:
+            lines.append(
+                f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
+                f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
+            )
+        send_email(
+            report_recipient or MAIL_TEST_RECIPIENT,
+            f"History Report – {application_id}",
+            "\n".join(lines),
         )
 
-        # FIX 3: optional email history report
-        history_email_sent = False
-        if email_report:
-            report_recipient = ""
-            if csv_row is not None:
-                for col in ["email", "email_address", "applicant_email", "mail"]:
-                    v = safe_str(csv_row.get(col, ""))
-                    if v.strip():
-                        report_recipient = v.strip()
-                        break
-
-            lines = [
-                f"Decision History Report – {application_id}",
-                f"Applicant : {csv_applicant_name}",
-                f"Total Records: {len(history)}",
-                "",
-            ]
-            for rec in history:
-                lines.append(
-                    f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
-                    f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
-                )
-
-            history_email_sent = send_email(
-                report_recipient or MAIL_TEST_RECIPIENT,
-                f"History Report – {application_id}",
-                "\n".join(lines),
-            )
-
         return {
-            "history":                 history,
-            # FIX 4: latency metrics
-            "processing_time_ms":      processing_time_ms,
-            "avg_decision_latency_ms": avg_decision_latency_ms,
-            # FIX 3: email report status
-            "email_report_sent":       history_email_sent,
+            "history":      history,
+            "email_report": True,
+            "latency_ms":   latency_ms,
         }
 
     except Exception as e:
@@ -889,8 +846,8 @@ CreditSentinel Team"""
         "applicant_name": real_applicant_name,
         "analyst_name":   analyst_name,
     }
-    audit_id        = await asyncio.create_task(fire_and_forget_audit(audit_payload))
-    processing_time = round(time.time() - decision_start, 3)
+    audit_id   = await asyncio.create_task(fire_and_forget_audit(audit_payload))
+    latency_ms = round((time.time() - decision_start) * 1000, 2)
 
     return {
         "application_id":    application_id,
@@ -902,7 +859,7 @@ CreditSentinel Team"""
         "notification_sent": notification_sent,
         "email_sent":        email_sent,
         "email_to":          recipient_email,
-        "processing_time":   processing_time,        # seconds — for latency monitoring
+        "latency_ms":        latency_ms,
         "message":           "Decision processed successfully",
     }
 
