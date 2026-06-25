@@ -69,8 +69,6 @@ MAIL_PORT           = int(os.getenv("MAIL_PORT", 2525))
 MAIL_USERNAME       = os.getenv("MAIL_USERNAME")
 MAIL_PASSWORD       = os.getenv("MAIL_PASSWORD")
 MAIL_FROM           = os.getenv("MAIL_FROM", "noreply@creditsentinel.com")
-# Set this in Render env vars to your Mailtrap inbox address
-# e.g. abc123@inbox.mailtrap.io
 MAIL_TEST_RECIPIENT = os.getenv("MAIL_TEST_RECIPIENT", "test@inbox.mailtrap.io")
 
 # =========================================================
@@ -172,8 +170,6 @@ def safe_str(val, default=""):
 
 # =========================================================
 # EMAIL
-# Always sends — falls back to MAIL_TEST_RECIPIENT
-# if no real applicant email found in CSV
 # =========================================================
 def send_email(recipient: str, subject: str, body: str) -> bool:
     try:
@@ -216,9 +212,6 @@ def get_status(risk_tier: str) -> str:
 def get_foir(monthly_income: float, monthly_emi: float) -> float:
     return round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0.0
 
-# =========================================================
-# FIX: EMI — try multiple possible column names
-# =========================================================
 def get_emi_from_row(row) -> float:
     for col in ["existing_monthly_emi", "monthly_emi", "emi", "current_emi", "total_emi"]:
         val = safe_float(row.get(col, None), default=-1)
@@ -226,9 +219,6 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
-# =========================================================
-# FIX: DECISION DATE — real timestamp from DB audit trail
-# =========================================================
 def get_decision_date(application_id: str) -> str:
     try:
         conn   = get_db_connection()
@@ -247,10 +237,6 @@ def get_decision_date(application_id: str) -> str:
     except Exception:
         return ""
 
-# =========================================================
-# FIX: APPLICATION STATUS — real status from DB
-# Falls back to risk-tier-based if not in DB yet
-# =========================================================
 def get_real_status(application_id: str, risk_tier: str) -> str:
     try:
         conn   = get_db_connection()
@@ -421,11 +407,6 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
-# FIX 1: foir uses multi-column EMI fallback
-# FIX 2: application_status from DB (real)
-# FIX 3: decision_date from DB audit trail (real)
-# FIX 4: created_at from CSV application_date
-# FIX 5: processing_time exposed for latency monitoring
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -452,7 +433,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             risk_score     = result["risk_score"]
             risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
-            monthly_emi    = get_emi_from_row(row)   # FIX 1
+            monthly_emi    = get_emi_from_row(row)
 
             applications.append({
                 "application_id":     app_id,
@@ -464,9 +445,9 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
                 "credit_score":       get_ml_credit_score(risk_score),
-                "application_status": get_real_status(app_id, risk_tier),   # FIX 2
-                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),  # FIX 4
-                "decision_date":      get_decision_date(app_id),             # FIX 3
+                "application_status": get_real_status(app_id, risk_tier),
+                "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
+                "decision_date":      get_decision_date(app_id),
             })
 
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
@@ -524,19 +505,9 @@ def get_application_detail(application_id: str):
         return {"error": str(e)}
 
 # =========================================================
-# HISTORY — GET /api/applications/{id}/history
-#
-# - analyst_name always "Divya" for every record
-# - notes auto-generated based on credit score per decision type
-# - email_to returned in response (same as process-decision)
-# - email report fires silently every call
-# - latency_ms returned at top level
+# CREDIT-SCORE BASED NOTE GENERATOR
 # =========================================================
-
-HISTORY_ANALYST = "Divya"
-
 def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, risk_tier: str) -> str:
-    """Generate a meaningful note based on credit score and decision."""
     if decision in ("APPROVE", "APPROVED"):
         if cibil_score >= 750:
             return (f"Application approved. Excellent credit score of {cibil_score} with low risk profile "
@@ -555,6 +526,17 @@ def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, ri
         return (f"Application flagged for manual review. Credit score {cibil_score} requires further assessment. "
                 f"Risk tier: {risk_tier} (score: {risk_score}). Assigned to senior analyst for evaluation.")
 
+# =========================================================
+# HISTORY — GET /api/applications/{id}/history
+#
+# - analyst_name: read from audit_trail DB (whoever submitted
+#   the decision via process-decision). Falls back to "SYSTEM"
+#   only when no analyst was recorded.
+# - notes: auto-generated based on credit score per decision
+# - email_to: returned in response
+# - email report fires silently on every call
+# - latency_ms: returned at top level
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     history_start = time.time()
@@ -581,13 +563,13 @@ def get_decision_history(application_id: str):
         csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
         csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
 
-        # ── Credit score for note generation ────────────────────
+        # ── Credit scores for note generation ───────────────────
         score_data  = generate_risk_score(application_id)
         risk_score  = score_data["risk_score"]
         risk_tier   = score_data["risk_tier"]
         cibil_score = compute_cibil_score(csv_row) if csv_row is not None else 650
 
-        # ── Resolve email recipient from CSV ─────────────────────
+        # ── Resolve email recipient ──────────────────────────────
         email_to = ""
         if csv_row is not None:
             for col in ["email", "email_address", "applicant_email", "mail"]:
@@ -622,7 +604,7 @@ def get_decision_history(application_id: str):
                     "decision":       decision,
                     "notes":          status_note,
                     "applicant_name": csv_applicant_name,
-                    "analyst_name":   HISTORY_ANALYST,
+                    "analyst_name":   "SYSTEM",   # no real analyst yet — first auto-entry
                 }
                 real_audit_id = _audit_worker(payload)
                 latency_ms    = round((time.time() - history_start) * 1000, 2)
@@ -634,7 +616,7 @@ def get_decision_history(application_id: str):
                         f"Decision History for {application_id}\n"
                         f"Applicant : {csv_applicant_name}\n"
                         f"Decision  : {decision}\n"
-                        f"Analyst   : {HISTORY_ANALYST}\n"
+                        f"Analyst   : SYSTEM\n"
                         f"Date      : {csv_application_date or 'N/A'}\n"
                         f"Notes     : {status_note}\n"
                     ),
@@ -647,7 +629,7 @@ def get_decision_history(application_id: str):
                         "notes":            status_note,
                         "timestamp":        csv_application_date or datetime.now().isoformat(),
                         "applicant_name":   csv_applicant_name,
-                        "analyst_name":     HISTORY_ANALYST,
+                        "analyst_name":     "SYSTEM",
                         "application_date": csv_application_date,
                         "decision_date":    csv_application_date,
                         "created_at":       csv_created_at,
@@ -664,6 +646,11 @@ def get_decision_history(application_id: str):
         # ── Build history list ───────────────────────────────────
         history = []
         for row in rows:
+            # analyst_name: read directly from DB — whoever called process-decision
+            raw_analyst  = row[5] if len(row) > 5 else None
+            analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
+            analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
+
             db_appl_val  = row[4]
             db_appl_str  = str(db_appl_val).strip() if db_appl_val is not None else ""
             final_applicant_name = (
@@ -672,12 +659,10 @@ def get_decision_history(application_id: str):
                 else safe_str(db_appl_val)
             )
 
-            ts_obj     = row[3]
-            ts_iso     = ts_obj.isoformat() if ts_obj else None
+            ts_obj      = row[3]
+            ts_iso      = ts_obj.isoformat() if ts_obj else None
             db_decision = safe_str(row[1])
-
-            # regenerate credit-score-based note for each record
-            smart_note = get_credit_based_note(db_decision, cibil_score, risk_score, risk_tier)
+            smart_note  = get_credit_based_note(db_decision, cibil_score, risk_score, risk_tier)
 
             history.append({
                 "audit_id":         row[0],
@@ -685,7 +670,7 @@ def get_decision_history(application_id: str):
                 "notes":            smart_note,
                 "timestamp":        ts_iso,
                 "applicant_name":   final_applicant_name,
-                "analyst_name":     HISTORY_ANALYST,
+                "analyst_name":     analyst_name,        # real name from DB, not hardcoded
                 "application_date": csv_application_date,
                 "decision_date":    ts_iso or csv_application_date,
                 "created_at":       csv_created_at,
@@ -694,7 +679,6 @@ def get_decision_history(application_id: str):
 
         latency_ms = round((time.time() - history_start) * 1000, 2)
 
-        # send email report silently
         lines = [
             f"Decision History Report – {application_id}",
             f"Applicant : {csv_applicant_name}",
@@ -724,9 +708,6 @@ def get_decision_history(application_id: str):
 
 # =========================================================
 # PROCESS DECISION — POST /api/applications/{id}/process-decision
-# FIX: email always fires (fallback to MAIL_TEST_RECIPIENT)
-# FIX: analyst_name saved to audit_trail
-# FIX: processing_time returned for latency monitoring
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
@@ -764,7 +745,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
 
-    # Try multiple possible email column names from CSV
     recipient_email = ""
     for col in ["email", "email_address", "applicant_email", "mail", "contact_email"]:
         val = safe_str(matched.iloc[0].get(col, ""))
@@ -772,7 +752,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
             recipient_email = val.strip()
             break
 
-    # Always fall back to Mailtrap test inbox if no email in CSV
     if not recipient_email:
         recipient_email = MAIL_TEST_RECIPIENT
         print(f"[EMAIL] No CSV email for {application_id} — using: {recipient_email}")
@@ -815,9 +794,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
-        # ==========================================
-        # SEND EMAIL — always fires via Mailtrap
-        # ==========================================
         if decision == "APPROVE":
             email_sent = send_email(
                 recipient_email,
@@ -872,7 +848,7 @@ CreditSentinel Team"""
         "decision":       decision,
         "notes":          notes,
         "applicant_name": real_applicant_name,
-        "analyst_name":   analyst_name,
+        "analyst_name":   analyst_name,   # saved exactly as sent from frontend
     }
     audit_id   = await asyncio.create_task(fire_and_forget_audit(audit_payload))
     latency_ms = round((time.time() - decision_start) * 1000, 2)
