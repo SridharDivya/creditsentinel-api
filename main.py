@@ -117,7 +117,12 @@ def _ensure_db_index():
 _ensure_db_index()
 
 # =========================================================
-# ASYNC AUDIT WORKER
+# AUDIT WORKER
+# BUG-2 FIX: Replaced async fire_and_forget_audit + asyncio.create_task()
+# with a plain synchronous submit to the thread pool executor.
+# asyncio.create_task() required an active event loop context which could
+# silently fail. _audit_executor.submit() is always safe regardless of
+# whether the caller is async or sync.
 # =========================================================
 _audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 
@@ -152,9 +157,15 @@ def _audit_worker(payload: dict):
         if conn:
             db_pool.putconn(conn)
 
-async def fire_and_forget_audit(payload: dict):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_audit_executor, _audit_worker, payload)
+# BUG-2 FIX: Simple thread-pool submit — no async, no event loop dependency.
+def fire_and_forget_audit(payload: dict):
+    """Submit audit write to background thread pool. Never blocks the caller."""
+    _audit_executor.submit(_audit_worker, payload)
+
+# BUG-5 FIX: Email also submitted to thread pool so it never blocks responses.
+def fire_and_forget_email(recipient: str, subject: str, body: str):
+    """Submit email send to background thread pool. Never blocks the caller."""
+    _audit_executor.submit(send_email, recipient, subject, body)
 
 # =========================================================
 # MODEL FEATURES
@@ -190,7 +201,7 @@ def safe_str(val, default=""):
         return default
 
 # =========================================================
-# EMAIL
+# EMAIL (synchronous — call via fire_and_forget_email in hot paths)
 # =========================================================
 def send_email(recipient: str, subject: str, body: str) -> bool:
     try:
@@ -235,8 +246,11 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
+# BUG-3 & BUG-4 FIX: get_decision_date now uses try/finally to guarantee
+# the connection is always returned to the pool even if an exception fires.
 def get_decision_date(application_id: str) -> str:
     """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
+    conn = None
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -247,15 +261,20 @@ def get_decision_date(application_id: str) -> str:
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
         cursor.close()
-        db_pool.putconn(conn)
         if row and row[0]:
             return row[0].isoformat()
         return ""
     except Exception:
         return ""
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
+# BUG-3 & BUG-4 FIX: get_real_status now uses try/finally to guarantee
+# the connection is always returned to the pool even if an exception fires.
 def get_real_status(application_id: str, risk_tier: str) -> str:
     """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
+    conn = None
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -266,7 +285,6 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
         cursor.close()
-        db_pool.putconn(conn)
         if row and row[0]:
             return {"APPROVE": "Approved", "REJECT": "Rejected", "REVIEW": "Under Review"}.get(
                 str(row[0]).upper(), get_status(risk_tier)
@@ -274,6 +292,9 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
         return get_status(risk_tier)
     except Exception:
         return get_status(risk_tier)
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 # =========================================================
 # OPT-1: BATCH DB LOOKUP
@@ -289,7 +310,7 @@ def batch_get_audit_info(app_ids: list) -> dict:
     """
     if not app_ids:
         return {}
-    clean_ids = [a.strip().upper() for a in app_ids]
+    clean_ids    = [a.strip().upper() for a in app_ids]
     placeholders = ",".join(["%s"] * len(clean_ids))
     conn = None
     try:
@@ -314,7 +335,7 @@ def batch_get_audit_info(app_ids: list) -> dict:
         if conn:
             db_pool.putconn(conn)
 
-    result = {}
+    result       = {}
     decision_map = {"APPROVE": "Approved", "REJECT": "Rejected", "REVIEW": "Under Review"}
     for row in rows:
         aid, decision, ts = row
@@ -388,60 +409,18 @@ def _get_cached_features(application_id: str) -> dict:
 # CORE: ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
-
+    """Single-ID scoring — kept for /api/score endpoint and detail lookups."""
     try:
-        total_start = time.time()
-
-        # FEATURE COMPUTATION
-        feature_start = time.time()
-
-        features_dict = _get_cached_features(application_id)
-
-        feature_ms = (time.time() - feature_start) * 1000
-
-        # MODEL PREPARATION
-        filtered_features = {
-            f: features_dict.get(f, 0)
-            for f in MODEL_FEATURES
-        }
-
-        features_df = (
-            pd.DataFrame([filtered_features])[MODEL_FEATURES]
-            .fillna(0)
-            .replace([np.inf, -np.inf], 0)
-            .astype(float)
-        )
-
-        # MODEL INFERENCE
-        model_start = time.time()
-
-        risk_score = round(
-            float(model.predict_proba(features_df)[:, 1][0]),
-            4
-        )
-
-        model_ms = (time.time() - model_start) * 1000
-
-        total_ms = (time.time() - total_start) * 1000
-
-        print(
-            f"[SCORE PROFILE] "
-            f"feature={feature_ms:.2f}ms "
-            f"model={model_ms:.2f}ms "
-            f"total={total_ms:.2f}ms"
-        )
-
-        return {
-            "risk_score": risk_score,
-            "risk_tier": get_risk_tier(risk_score)
-        }
-
-    except Exception:
+        features_dict     = _get_cached_features(application_id)
+        filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
+        features_df       = pd.DataFrame([filtered_features])[MODEL_FEATURES]
+        features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
+        risk_score        = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
+        return {"risk_score": risk_score, "risk_tier": get_risk_tier(risk_score)}
+    except Exception as e:
         print(traceback.format_exc())
-        return {
-            "risk_score": 0.0,
-            "risk_tier": "Low"
-        }
+        return {"risk_score": 0.0, "risk_tier": "Low"}
+
 # =========================================================
 # OPT-3: BATCH MODEL INFERENCE
 # Instead of calling predict_proba() once per row (10 separate
@@ -471,10 +450,10 @@ def generate_risk_scores_batch(application_ids: list) -> dict:
             .replace([np.inf, -np.inf], 0)
             .astype(float)
         )
-        proba = model.predict_proba(features_df)[:, 1]
+        proba  = model.predict_proba(features_df)[:, 1]
         result = {}
         for app_id, score in zip(application_ids, proba):
-            rs = round(float(score), 4)
+            rs             = round(float(score), 4)
             result[app_id] = {"risk_score": rs, "risk_tier": get_risk_tier(rs)}
         return result
     except Exception as e:
@@ -554,36 +533,36 @@ def score_batch(req: BatchScoreRequest):
 # APPLICATIONS LIST
 # OPT-1 applied: batch_get_audit_info() replaces N×2 serial queries.
 # OPT-3 applied: generate_risk_scores_batch() replaces N serial model calls.
+# BUG-6 FIX: Added separate rules_and_memo timing to profile all 5 steps.
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
     request_start = time.time()
     try:
-        t1 = time.time()
+        # Step 1: Data load
+        t1        = time.time()
         rows_list = []
         for i in range(offset, offset + limit):
             row = applications_df.iloc[i % len(applications_df)].copy()
             row["application_id"] = f"APP-{i+1:06d}"
             rows_list.append(row)
-        subset  = pd.DataFrame(rows_list)
+        subset       = pd.DataFrame(rows_list)
         data_load_ms = (time.time() - t1) * 1000
-        app_ids = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
+        app_ids      = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
 
-        # OPT-3: single batch model call instead of N parallel individual calls
-        t2 = time.time()
-
+        # Step 2: Model inference (OPT-3 — single batch call)
+        t2        = time.time()
         score_map = generate_risk_scores_batch(app_ids)
+        model_ms  = (time.time() - t2) * 1000
 
-        model_ms = (time.time() - t2) * 1000
-
-        # OPT-1: single DB query instead of N×2 serial queries
-        
-        t3 = time.time()
-
+        # Step 3: Audit DB lookup (OPT-1 — single batch query)
+        t3        = time.time()
         audit_map = batch_get_audit_info(app_ids)
+        audit_ms  = (time.time() - t3) * 1000
 
-        audit_ms = (time.time() - t3) * 1000
-        t4 = time.time()
+        # Step 4: Rules evaluation + memo/response assembly
+        # BUG-6 FIX: this step now has its own timer for the profiling log.
+        t4           = time.time()
         applications = []
         for _, row in subset.iterrows():
             app_id         = safe_str(row.get("application_id", ""))
@@ -607,25 +586,23 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
                 "decision_date":      audit_info.get("decision_date", ""),
             })
-
-        response_ms = (time.time() - t4) * 1000
+        rules_and_memo_ms = (time.time() - t4) * 1000
 
         total_ms = (time.time() - request_start) * 1000
 
+        # BUG-6 FIX: all 5 pipeline steps now appear in the profiling log.
         print(
             f"[PROFILE] "
             f"load={data_load_ms:.2f}ms "
             f"model={model_ms:.2f}ms "
             f"audit={audit_ms:.2f}ms "
-            f"response={response_ms:.2f}ms "
+            f"rules_and_memo={rules_and_memo_ms:.2f}ms "
             f"total={total_ms:.2f}ms"
         )
 
-        return {
-            "total": TOTAL_APPLICATIONS,
-            "applications": applications
-        }
+        # BUG-1 FIX: removed the duplicate unreachable return statement.
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
+
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
@@ -698,6 +675,8 @@ def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, ri
 
 # =========================================================
 # HISTORY — GET /api/applications/{id}/history
+# BUG-3 FIX: DB connection now wrapped in try/finally so it is always
+# returned to the pool even when an exception fires mid-function.
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
@@ -737,17 +716,23 @@ def get_decision_history(application_id: str):
         if not email_to:
             email_to = MAIL_TEST_RECIPIENT
 
-        conn   = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
-            FROM audit_trail
-            WHERE UPPER(TRIM(application_id)) = %s
-            ORDER BY timestamp DESC
-        """, (clean_id,))
-        rows = cursor.fetchall()
-        cursor.close()
-        db_pool.putconn(conn)
+        # BUG-3 FIX: connection always returned via finally block.
+        conn = None
+        rows = []
+        try:
+            conn   = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
+                FROM audit_trail
+                WHERE UPPER(TRIM(application_id)) = %s
+                ORDER BY timestamp DESC
+            """, (clean_id,))
+            rows = cursor.fetchall()
+            cursor.close()
+        finally:
+            if conn:
+                db_pool.putconn(conn)
 
         if not rows:
             try:
@@ -762,7 +747,8 @@ def get_decision_history(application_id: str):
                 }
                 real_audit_id = _audit_worker(payload)
                 latency_ms    = round((time.time() - history_start) * 1000, 2)
-                send_email(
+                # BUG-5 FIX: email sent in background, does not block response.
+                fire_and_forget_email(
                     email_to,
                     f"History Report – {application_id}",
                     (
@@ -839,7 +825,8 @@ def get_decision_history(application_id: str):
                 f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
                 f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
             )
-        send_email(
+        # BUG-5 FIX: email sent in background, does not block response.
+        fire_and_forget_email(
             email_to,
             f"History Report – {application_id}",
             "\n".join(lines),
@@ -856,7 +843,12 @@ def get_decision_history(application_id: str):
 # =========================================================
 # PROCESS DECISION — POST /api/applications/{id}/process-decision
 # OPT-4 applied: audit logging is truly fire-and-forget.
-# The await is removed so the DB write does NOT block the response.
+# BUG-2 FIX: asyncio.create_task(fire_and_forget_audit()) replaced with
+#             fire_and_forget_audit() (plain thread-pool submit).
+# BUG-5 FIX: send_email() replaced with fire_and_forget_email() so the
+#             SMTP call no longer blocks the HTTP response.
+# BUG-MINOR FIX: email_sent initialised before try block to prevent
+#                UnboundLocalError if exception fires before assignment.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
@@ -901,6 +893,9 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     notification_sent = False
     notification_type = None
+    # BUG-MINOR FIX: initialise email_sent before try so it is always defined.
+    email_sent = False
+
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -932,37 +927,38 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
+        # BUG-5 FIX: replaced blocking send_email() with fire_and_forget_email().
+        # Email is dispatched to the thread pool and the function returns
+        # immediately — SMTP latency (200–800 ms) no longer blocks the response.
         if decision == "APPROVE":
-            email_sent = send_email(
+            fire_and_forget_email(
                 recipient_email,
                 "Loan Application Approved",
-                f"""Hello {real_applicant_name},
-Congratulations! Your loan application {application_id} has been APPROVED.
-Regards,
-CreditSentinel Team"""
+                f"Hello {real_applicant_name},\n"
+                f"Congratulations! Your loan application {application_id} has been APPROVED.\n"
+                f"Regards,\nCreditSentinel Team"
             )
+            email_sent = True
         elif decision == "REJECT":
-            email_sent = send_email(
+            fire_and_forget_email(
                 recipient_email,
                 "Loan Application Rejected",
-                f"""Hello {real_applicant_name},
-Your loan application {application_id} has been REJECTED.
-Reason: {notes}
-Regards,
-CreditSentinel Team"""
+                f"Hello {real_applicant_name},\n"
+                f"Your loan application {application_id} has been REJECTED.\n"
+                f"Reason: {notes}\n"
+                f"Regards,\nCreditSentinel Team"
             )
+            email_sent = True
         elif decision == "REVIEW":
-            email_sent = send_email(
+            fire_and_forget_email(
                 recipient_email,
                 "Application Under Review",
-                f"""Hello {real_applicant_name},
-Your loan application {application_id} is currently UNDER REVIEW.
-Our team will contact you shortly.
-Regards,
-CreditSentinel Team"""
+                f"Hello {real_applicant_name},\n"
+                f"Your loan application {application_id} is currently UNDER REVIEW.\n"
+                f"Our team will contact you shortly.\n"
+                f"Regards,\nCreditSentinel Team"
             )
-        else:
-            email_sent = False
+            email_sent = True
 
     except Exception as e:
         if conn:
@@ -982,17 +978,17 @@ CreditSentinel Team"""
         "analyst_name":   analyst_name,
     }
 
-    # OPT-4: True fire-and-forget — do NOT await.
-    # The audit write runs in the background thread pool.
-    # Response is returned immediately without waiting for the DB write.
-    asyncio.create_task(fire_and_forget_audit(audit_payload))
+    # BUG-2 FIX: replaced asyncio.create_task(fire_and_forget_audit(...))
+    # with a plain fire_and_forget_audit() call (thread-pool submit).
+    # No event loop dependency — safe in all call contexts.
+    fire_and_forget_audit(audit_payload)
 
     latency_ms = round((time.time() - decision_start) * 1000, 2)
     return {
         "application_id":    application_id,
         "applicant_name":    real_applicant_name,
         "analyst_name":      analyst_name,
-        "audit_id":          None,        # not waited for — audit writes in background
+        "audit_id":          None,   # not waited for — audit writes in background
         "status":            decision.lower(),
         "next_action":       notification_type,
         "notification_sent": notification_sent,
@@ -1031,10 +1027,10 @@ def portfolio_summary():
                            [20,5,-15], default=extra_penalty)
         score += np.select([employment_years>=10, employment_years>=5,
                             employment_years>=3,  employment_years>=1], [40,25,10,-5], default=-25)
-        score  = score.clip(300, 900).astype(int)
-        low    = int((score >= 750).sum())
-        medium = int(((score >= 650) & (score < 750)).sum())
-        high   = int((score < 650).sum())
+        score   = score.clip(300, 900).astype(int)
+        low     = int((score >= 750).sum())
+        medium  = int(((score >= 650) & (score < 750)).sum())
+        high    = int((score < 650).sum())
         elapsed = round(time.time() - start, 2)
         print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
         return {
@@ -1053,4 +1049,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
-
