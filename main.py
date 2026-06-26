@@ -388,18 +388,60 @@ def _get_cached_features(application_id: str) -> dict:
 # CORE: ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
-    """Single-ID scoring — kept for /api/score endpoint and detail lookups."""
-    try:
-        features_dict     = _get_cached_features(application_id)
-        filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
-        features_df       = pd.DataFrame([filtered_features])[MODEL_FEATURES]
-        features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
-        risk_score        = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
-        return {"risk_score": risk_score, "risk_tier": get_risk_tier(risk_score)}
-    except Exception as e:
-        print(traceback.format_exc())
-        return {"risk_score": 0.0, "risk_tier": "Low"}
 
+    try:
+        total_start = time.time()
+
+        # FEATURE COMPUTATION
+        feature_start = time.time()
+
+        features_dict = _get_cached_features(application_id)
+
+        feature_ms = (time.time() - feature_start) * 1000
+
+        # MODEL PREPARATION
+        filtered_features = {
+            f: features_dict.get(f, 0)
+            for f in MODEL_FEATURES
+        }
+
+        features_df = (
+            pd.DataFrame([filtered_features])[MODEL_FEATURES]
+            .fillna(0)
+            .replace([np.inf, -np.inf], 0)
+            .astype(float)
+        )
+
+        # MODEL INFERENCE
+        model_start = time.time()
+
+        risk_score = round(
+            float(model.predict_proba(features_df)[:, 1][0]),
+            4
+        )
+
+        model_ms = (time.time() - model_start) * 1000
+
+        total_ms = (time.time() - total_start) * 1000
+
+        print(
+            f"[SCORE PROFILE] "
+            f"feature={feature_ms:.2f}ms "
+            f"model={model_ms:.2f}ms "
+            f"total={total_ms:.2f}ms"
+        )
+
+        return {
+            "risk_score": risk_score,
+            "risk_tier": get_risk_tier(risk_score)
+        }
+
+    except Exception:
+        print(traceback.format_exc())
+        return {
+            "risk_score": 0.0,
+            "risk_tier": "Low"
+        }
 # =========================================================
 # OPT-3: BATCH MODEL INFERENCE
 # Instead of calling predict_proba() once per row (10 separate
