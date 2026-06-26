@@ -11,8 +11,6 @@ import time
 import json
 import asyncio
 import threading
-import queue
-import atexit
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -93,6 +91,8 @@ except Exception as e:
 
 # =========================================================
 # OPT-5: CREATE DB INDEX ON STARTUP (runs once)
+# Ensures UPPER(TRIM(application_id)) lookups use an index
+# instead of a full table scan on audit_trail.
 # =========================================================
 def _ensure_db_index():
     conn = None
@@ -117,58 +117,10 @@ def _ensure_db_index():
 _ensure_db_index()
 
 # =========================================================
-# SHARED EXECUTORS
-# Two pools: audit (DB writes) and email (SMTP).
-# Keeping them separate prevents a slow SMTP host from
-# starving audit writes (or vice-versa) under high load.
-# =========================================================
-_audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
-_email_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="email")
-
-# =========================================================
-# FIX-4: BUFFERED ASYNC LOG WRITER
-# Replaces per-request open("model_predictions.log", "a")
-# with a background thread that drains a queue every 2 s.
-# Eliminates one syscall + potential fsync per /api/score call.
-# =========================================================
-_log_queue: queue.Queue = queue.Queue()
-
-def _log_flusher():
-    log_path = os.path.join(BASE_DIR, "model_predictions.log")
-    while True:
-        entries = []
-        try:
-            # Block until at least one entry, then drain what's available
-            entries.append(_log_queue.get(timeout=2))
-            while True:
-                try:
-                    entries.append(_log_queue.get_nowait())
-                except queue.Empty:
-                    break
-        except queue.Empty:
-            pass
-        if entries:
-            try:
-                with open(log_path, "a") as f:
-                    for e in entries:
-                        f.write(json.dumps(e) + "\n")
-            except Exception as exc:
-                print(f"[LOG FLUSH ERROR] {exc}")
-
-_log_thread = threading.Thread(target=_log_flusher, daemon=True, name="log-flusher")
-_log_thread.start()
-print("✅ Async log flusher started")
-
-def _enqueue_log(entry: dict):
-    """Non-blocking drop into the log queue."""
-    try:
-        _log_queue.put_nowait(entry)
-    except queue.Full:
-        pass  # drop rather than block the request thread
-
-# =========================================================
 # ASYNC AUDIT WORKER
 # =========================================================
+_audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
+
 def _audit_worker(payload: dict):
     conn = None
     try:
@@ -238,11 +190,7 @@ def safe_str(val, default=""):
         return default
 
 # =========================================================
-# FIX-2: NON-BLOCKING EMAIL
-# send_email() is unchanged (it can still be called directly
-# in tests / scripts). All in-request call sites now use
-# _submit_email() which offloads to _email_executor so the
-# SMTP TCP + TLS handshake never holds a request thread.
+# EMAIL
 # =========================================================
 def send_email(recipient: str, subject: str, body: str) -> bool:
     try:
@@ -266,15 +214,6 @@ def send_email(recipient: str, subject: str, body: str) -> bool:
         print(f"[EMAIL ERROR] {e}")
         return False
 
-def _submit_email(recipient: str, subject: str, body: str):
-    """
-    Fire-and-forget email dispatch.
-    Submits to the email thread pool and returns immediately —
-    the request thread is never blocked by SMTP I/O.
-    Returns the Future in case the caller wants to inspect it later.
-    """
-    return _email_executor.submit(send_email, recipient, subject, body)
-
 # =========================================================
 # SHARED HELPERS
 # =========================================================
@@ -297,7 +236,7 @@ def get_emi_from_row(row) -> float:
     return 0.0
 
 def get_decision_date(application_id: str) -> str:
-    """Single-ID lookup — used only by detail endpoint."""
+    """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -316,7 +255,7 @@ def get_decision_date(application_id: str) -> str:
         return ""
 
 def get_real_status(application_id: str, risk_tier: str) -> str:
-    """Single-ID lookup — used only by detail endpoint."""
+    """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -338,8 +277,16 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
 
 # =========================================================
 # OPT-1: BATCH DB LOOKUP
+# Replaces N×2 serial SELECT calls with a single GROUP BY query.
+# Used by /api/applications to fetch status + decision_date
+# for all rows on the page in one round-trip.
 # =========================================================
 def batch_get_audit_info(app_ids: list) -> dict:
+    """
+    Returns {UPPER(app_id): {"status": str, "decision_date": str}}
+    for every ID in app_ids — using a single DB query.
+    Falls back to empty dict on any error (caller uses get_status() fallback).
+    """
     if not app_ids:
         return {}
     clean_ids = [a.strip().upper() for a in app_ids]
@@ -419,55 +366,29 @@ def get_ml_credit_score(risk_score: float) -> int:
 
 # =========================================================
 # OPT-2: LRU FEATURE CACHE
+# Replaces the manual dict+lock cache with functools.lru_cache.
+# lru_cache is thread-safe, uses LRU eviction (better than FIFO),
+# and has near-zero overhead on cache hits (~0.1 ms vs 80–120 ms cold).
+# maxsize=2000 ≈ 6–8 MB RAM — safe on Render Free (512 MB limit).
 # =========================================================
 @lru_cache(maxsize=2000)
 def _cached_features_frozen(application_id: str) -> tuple:
+    """
+    Returns feature dict as a sorted tuple of (key, value) pairs.
+    Tuples are hashable so lru_cache can key on them.
+    """
     features = compute_features(application_id)
     return tuple(sorted(features.items()))
 
 def _get_cached_features(application_id: str) -> dict:
+    """Public interface — returns a plain dict from the frozen cache."""
     return dict(_cached_features_frozen(application_id))
-
-# =========================================================
-# FIX-1: STARTUP CACHE WARM-UP
-# Pre-computes features for the first N application IDs in a
-# background daemon thread so cold misses don't hit during the
-# first real-traffic burst.
-# On Render Free (1 vCPU) compute_features() takes 80–200 ms
-# per cold miss; 500 pre-warmed IDs covers the first 50 pages
-# of 10 results each with zero cold-miss cost.
-# The thread is daemonised so it never blocks server shutdown.
-# =========================================================
-_WARM_COUNT = int(os.getenv("CACHE_WARM_COUNT", 500))
-
-def _warm_feature_cache(n: int = _WARM_COUNT):
-    warmed, errors = 0, 0
-    t0 = time.time()
-    for i in range(min(n, len(applications_df))):
-        app_id = f"APP-{i + 1:06d}"
-        try:
-            _cached_features_frozen(app_id)
-            warmed += 1
-        except Exception as exc:
-            errors += 1
-            if errors <= 3:
-                print(f"[WARM] Error on {app_id}: {exc}")
-    elapsed = round((time.time() - t0) * 1000, 1)
-    print(f"✅ Feature cache warmed: {warmed} IDs in {elapsed} ms ({errors} errors)")
-
-_warm_thread = threading.Thread(
-    target=_warm_feature_cache,
-    daemon=True,
-    name="cache-warmer",
-)
-_warm_thread.start()
-print(f"✅ Cache warm-up started in background ({_WARM_COUNT} IDs)")
 
 # =========================================================
 # CORE: ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
-    """Single-ID scoring — used by /api/score and detail endpoint."""
+    """Single-ID scoring — kept for /api/score endpoint and detail lookups."""
     try:
         features_dict     = _get_cached_features(application_id)
         filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
@@ -481,8 +402,18 @@ def generate_risk_score(application_id: str) -> dict:
 
 # =========================================================
 # OPT-3: BATCH MODEL INFERENCE
+# Instead of calling predict_proba() once per row (10 separate
+# calls for a page of 10), we build a 10-row DataFrame and call
+# predict_proba() once. LightGBM is significantly more efficient
+# this way, and it removes 9 redundant DataFrame constructions
+# under CPU contention on Render Free.
 # =========================================================
 def generate_risk_scores_batch(application_ids: list) -> dict:
+    """
+    Scores all IDs in a single model.predict_proba() call.
+    Returns {app_id: {"risk_score": float, "risk_tier": str}}.
+    Falls back to per-ID scoring if batch fails.
+    """
     if not application_ids:
         return {}
     try:
@@ -527,28 +458,13 @@ class DecisionRequest(BaseModel):
 # =========================================================
 @app.get("/health")
 def health():
-    cache_info = _cached_features_frozen.cache_info()
     return {
         "status":             "ok",
         "model_loaded":       True,
         "total_applications": TOTAL_APPLICATIONS,
         "cibil_source":       "computed_from_foir_income_lti_loans_employment",
-        "optimizations": [
-            "batch_db_lookup",
-            "lru_feature_cache",
-            "batch_model_inference",
-            "async_audit",
-            "db_index",
-            "startup_cache_warmup",   # FIX-1
-            "async_email",            # FIX-2
-            "buffered_log_writer",    # FIX-4
-        ],
-        "cache": {
-            "hits":    cache_info.hits,
-            "misses":  cache_info.misses,
-            "maxsize": cache_info.maxsize,
-            "currsize": cache_info.currsize,
-        },
+        "optimizations":      ["batch_db_lookup", "lru_feature_cache",
+                               "batch_model_inference", "async_audit", "db_index"],
     }
 
 # =========================================================
@@ -560,33 +476,24 @@ def score_application(req: ScoreRequest):
     try:
         result     = generate_risk_score(req.application_id)
         latency_ms = (time.time() - start_time) * 1000
-        # FIX-4: queue the log entry instead of opening the file inline
-        _enqueue_log({
-            "timestamp":      datetime.now().isoformat(),
-            "application_id": req.application_id,
-            "risk_score":     result["risk_score"],
-            "risk_tier":      result["risk_tier"],
-            "latency_ms":     round(latency_ms, 2),
-            "status":         "success",
-        })
+        log_entry  = {
+            "timestamp": datetime.now().isoformat(), "application_id": req.application_id,
+            "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
+            "latency_ms": round(latency_ms, 2), "status": "success",
+        }
+        with open("model_predictions.log", "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
         return {
-            "application_id": req.application_id,
-            "model_loaded":   True,
-            "risk_score":     result["risk_score"],
-            "risk_tier":      result["risk_tier"],
-            "features_used":  len(MODEL_FEATURES),
-            "latency_ms":     round(latency_ms, 2),
+            "application_id": req.application_id, "model_loaded": True,
+            "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
+            "features_used": len(MODEL_FEATURES), "latency_ms": round(latency_ms, 2),
         }
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-        # FIX-4: same here
-        _enqueue_log({
-            "timestamp":      datetime.now().isoformat(),
-            "application_id": req.application_id,
-            "latency_ms":     round(latency_ms, 2),
-            "status":         "error",
-            "error":          str(e),
-        })
+        with open("model_predictions.log", "a") as f:
+            f.write(json.dumps({"timestamp": datetime.now().isoformat(),
+                "application_id": req.application_id, "latency_ms": round(latency_ms, 2),
+                "status": "error", "error": str(e)}) + "\n")
         return {"application_id": req.application_id, "model_loaded": False, "error": str(e)}
 
 # =========================================================
@@ -603,8 +510,8 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
-# OPT-1: batch_get_audit_info() — single DB round-trip
-# OPT-3: generate_risk_scores_batch() — single model call
+# OPT-1 applied: batch_get_audit_info() replaces N×2 serial queries.
+# OPT-3 applied: generate_risk_scores_batch() replaces N serial model calls.
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
@@ -616,21 +523,24 @@ def get_applications(limit: int = 10, offset: int = 0):
             row = applications_df.iloc[i % len(applications_df)].copy()
             row["application_id"] = f"APP-{i+1:06d}"
             rows_list.append(row)
-        subset       = pd.DataFrame(rows_list)
+        subset  = pd.DataFrame(rows_list)
         data_load_ms = (time.time() - t1) * 1000
-
         app_ids = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
 
-        # OPT-3: single batch model call
-        t2        = time.time()
+        # OPT-3: single batch model call instead of N parallel individual calls
+        t2 = time.time()
+
         score_map = generate_risk_scores_batch(app_ids)
-        model_ms  = (time.time() - t2) * 1000
 
-        # OPT-1: single DB query
-        t3        = time.time()
+        model_ms = (time.time() - t2) * 1000
+
+        # OPT-1: single DB query instead of N×2 serial queries
+        
+        t3 = time.time()
+
         audit_map = batch_get_audit_info(app_ids)
-        audit_ms  = (time.time() - t3) * 1000
 
+        audit_ms = (time.time() - t3) * 1000
         t4 = time.time()
         applications = []
         for _, row in subset.iterrows():
@@ -657,7 +567,8 @@ def get_applications(limit: int = 10, offset: int = 0):
             })
 
         response_ms = (time.time() - t4) * 1000
-        total_ms    = (time.time() - request_start) * 1000
+
+        total_ms = (time.time() - request_start) * 1000
 
         print(
             f"[PROFILE] "
@@ -668,14 +579,18 @@ def get_applications(limit: int = 10, offset: int = 0):
             f"total={total_ms:.2f}ms"
         )
 
+        return {
+            "total": TOTAL_APPLICATIONS,
+            "applications": applications
+        }
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
-
     except Exception as e:
         print(traceback.format_exc())
         return {"error": str(e)}
 
 # =========================================================
 # APPLICATION DETAIL
+# (Single-ID path — batch not needed here)
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
@@ -690,15 +605,14 @@ def get_application_detail(application_id: str):
                 return {"error": "Application not found"}
         else:
             row = matched.iloc[0]
-
         monthly_income = safe_float(row.get("monthly_income", 0))
         monthly_emi    = get_emi_from_row(row)
         foir           = round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0
-        score_data     = generate_risk_score(application_id)
-        risk_score     = score_data["risk_score"]
-        risk_tier      = score_data["risk_tier"]
-        cibil_score    = compute_cibil_score(row)
-        credit_score   = get_ml_credit_score(risk_score)
+        score_data   = generate_risk_score(application_id)
+        risk_score   = score_data["risk_score"]
+        risk_tier    = score_data["risk_tier"]
+        cibil_score  = compute_cibil_score(row)
+        credit_score = get_ml_credit_score(risk_score)
         print(f"[DETAIL] id={application_id} | cibil={cibil_score} | credit={credit_score} | risk={risk_score}")
         return {
             "application_id":     safe_str(row.get("application_id", "")),
@@ -742,13 +656,9 @@ def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, ri
 
 # =========================================================
 # HISTORY — GET /api/applications/{id}/history
-# FIX-2: email is now fire-and-forget via _submit_email()
-# FIX-3: audit auto-insert is now offloaded to _audit_executor
-#         so the response is returned immediately without waiting
-#         for the DB INSERT to complete.
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
-async def get_decision_history(application_id: str):
+def get_decision_history(application_id: str):
     history_start = time.time()
     try:
         clean_id = str(application_id).strip().upper()
@@ -757,8 +667,8 @@ async def get_decision_history(application_id: str):
         ]
         if len(matched) == 0:
             try:
-                numeric = int(clean_id.split("-")[-1]) - 1
-                csv_row = applications_df.iloc[numeric % len(applications_df)].copy()
+                numeric   = int(clean_id.split("-")[-1]) - 1
+                csv_row   = applications_df.iloc[numeric % len(applications_df)].copy()
                 csv_row["application_id"] = application_id
             except Exception:
                 csv_row = None
@@ -808,14 +718,9 @@ async def get_decision_history(application_id: str):
                     "applicant_name": csv_applicant_name,
                     "analyst_name":   "SYSTEM",
                 }
-                # FIX-3: offload the DB INSERT to the background executor;
-                # do not block the response waiting for it.
-                asyncio.create_task(fire_and_forget_audit(payload))
-
-                latency_ms = round((time.time() - history_start) * 1000, 2)
-
-                # FIX-2: non-blocking email
-                _submit_email(
+                real_audit_id = _audit_worker(payload)
+                latency_ms    = round((time.time() - history_start) * 1000, 2)
+                send_email(
                     email_to,
                     f"History Report – {application_id}",
                     (
@@ -829,7 +734,7 @@ async def get_decision_history(application_id: str):
                 )
                 return {
                     "history": [{
-                        "audit_id":         None,   # write is async; ID not yet available
+                        "audit_id":         real_audit_id,
                         "decision":         decision,
                         "notes":            status_note,
                         "timestamp":        csv_application_date or datetime.now().isoformat(),
@@ -892,9 +797,7 @@ async def get_decision_history(application_id: str):
                 f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
                 f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
             )
-
-        # FIX-2: non-blocking email
-        _submit_email(
+        send_email(
             email_to,
             f"History Report – {application_id}",
             "\n".join(lines),
@@ -910,8 +813,8 @@ async def get_decision_history(application_id: str):
 
 # =========================================================
 # PROCESS DECISION — POST /api/applications/{id}/process-decision
-# OPT-4: audit logging is fire-and-forget (unchanged)
-# FIX-2: email is now offloaded to _email_executor
+# OPT-4 applied: audit logging is truly fire-and-forget.
+# The await is removed so the DB write does NOT block the response.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
 async def process_decision(application_id: str, req: DecisionRequest):
@@ -956,7 +859,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     notification_sent = False
     notification_type = None
-
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
@@ -988,44 +890,43 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
-        # FIX-2: all three email paths are now fire-and-forget
         if decision == "APPROVE":
-            _submit_email(
+            email_sent = send_email(
                 recipient_email,
                 "Loan Application Approved",
                 f"""Hello {real_applicant_name},
 Congratulations! Your loan application {application_id} has been APPROVED.
 Regards,
-CreditSentinel Team""",
+CreditSentinel Team"""
             )
         elif decision == "REJECT":
-            _submit_email(
+            email_sent = send_email(
                 recipient_email,
                 "Loan Application Rejected",
                 f"""Hello {real_applicant_name},
 Your loan application {application_id} has been REJECTED.
 Reason: {notes}
 Regards,
-CreditSentinel Team""",
+CreditSentinel Team"""
             )
         elif decision == "REVIEW":
-            _submit_email(
+            email_sent = send_email(
                 recipient_email,
                 "Application Under Review",
                 f"""Hello {real_applicant_name},
 Your loan application {application_id} is currently UNDER REVIEW.
 Our team will contact you shortly.
 Regards,
-CreditSentinel Team""",
+CreditSentinel Team"""
             )
+        else:
+            email_sent = False
 
     except Exception as e:
         if conn:
             conn.rollback()
-            try:
-                cursor.close()
-            except Exception:
-                pass
+            try: cursor.close()
+            except: pass
             db_pool.putconn(conn)
         return JSONResponse(status_code=500, content={
             "status": "failed", "application_id": application_id, "error": str(e)
@@ -1039,7 +940,9 @@ CreditSentinel Team""",
         "analyst_name":   analyst_name,
     }
 
-    # OPT-4: true fire-and-forget audit write
+    # OPT-4: True fire-and-forget — do NOT await.
+    # The audit write runs in the background thread pool.
+    # Response is returned immediately without waiting for the DB write.
     asyncio.create_task(fire_and_forget_audit(audit_payload))
 
     latency_ms = round((time.time() - decision_start) * 1000, 2)
@@ -1047,11 +950,11 @@ CreditSentinel Team""",
         "application_id":    application_id,
         "applicant_name":    real_applicant_name,
         "analyst_name":      analyst_name,
-        "audit_id":          None,   # async write — ID not waited for
+        "audit_id":          None,        # not waited for — audit writes in background
         "status":            decision.lower(),
         "next_action":       notification_type,
         "notification_sent": notification_sent,
-        "email_sent":        True,   # submitted to executor; delivery is async
+        "email_sent":        email_sent,
         "email_to":          recipient_email,
         "latency_ms":        latency_ms,
         "message":           "Decision processed successfully",
@@ -1104,8 +1007,8 @@ def portfolio_summary():
         print("PORTFOLIO ERROR:", err)
         return {"error": str(e), "detail": err}
 
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
