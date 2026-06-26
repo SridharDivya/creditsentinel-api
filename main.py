@@ -551,7 +551,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = get_emi_from_row(row)
             audit_info     = audit_map.get(app_id.strip().upper(), {})
-                        applications.append({
+            applications.append({
                 "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
                 "foir":               get_foir(monthly_income, monthly_emi),
