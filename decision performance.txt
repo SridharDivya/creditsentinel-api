@@ -1,0 +1,84 @@
+WEEK 7 – DAY 4 STANDUP (CREDSENTINEL)
+
+==================================================
+SRIDHAR
+==================================================
+
+Completed
+- Reviewed Day 3 load-testing results.
+- Analyzed workflow latency bottlenecks for 100+ concurrent users.
+- Identified Model Scoring/Inference as the primary bottleneck.
+- Implemented model caching and request batching.
+- Optimized feature computation by reducing redundant calculations.
+- Conducted post-optimization performance testing.
+
+Results
+- Applications Processed: 102
+- Failures: 0
+- Concurrent Users Tested: 50+
+- Latency reduced through workflow optimizations.
+- System remains stable under load.
+
+Next Steps
+- Continue monitoring inference performance.
+- Evaluate additional scaling strategies for higher concurrency.
+
+Blockers
+- None.
+
+==================================================
+DIVYA
+==================================================
+
+Completed
+- Profiled workflow components including feature computation, memo generation, and audit logging.
+- Optimized feature calculation through caching.
+- Parallelized memo generation with workflow execution.
+- Implemented asynchronous audit logging.
+- Documented bottleneck analysis and optimization strategy.
+
+Results
+- Workflow execution improved across all tested concurrency levels.
+- Error Rate: 0%
+- CPU and memory utilization remained stable.
+- Production readiness assessment completed.
+
+Next Steps
+- Perform additional edge-case testing:
+  * Memo Generation Failure
+  * Model Scoring Timeout
+  * Rollback Validation
+- Monitor performance during extended load testing.
+
+Blockers
+- None.
+
+==================================================
+OVERALL DAY 4 SUMMARY
+==================================================
+
+Objective
+- Optimize workflow latency within Render Free Tier constraints.
+
+Key Findings
+- Primary Bottleneck: Model Scoring / Inference
+- Secondary Bottlenecks:
+  * Feature Computation
+  * Memo Generation
+  * Audit Logging
+
+Optimizations Applied
+1. Model caching
+2. Request batching
+3. Feature caching
+4. Parallel memo generation
+5. Asynchronous audit logging
+
+Outcome
+- Successfully processed 102 applications.
+- Maintained 0 failures.
+- Improved workflow efficiency and production readiness.
+- Established a foundation for supporting 100+ concurrent users.
+
+Status: COMPLETED
+Production Readiness: READY FOR DEPLOYMENT
