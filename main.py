@@ -551,7 +551,7 @@ def get_applications(limit: int = 10, offset: int = 0):
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = get_emi_from_row(row)
             audit_info     = audit_map.get(app_id.strip().upper(), {})
-            applications.append({
+                        applications.append({
                 "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
                 "foir":               get_foir(monthly_income, monthly_emi),
@@ -565,18 +565,24 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
                 "decision_date":      audit_info.get("decision_date", ""),
             })
-response_ms = (time.time() - t4) * 1000
 
-total_ms = (time.time() - request_start) * 1000
+        response_ms = (time.time() - t4) * 1000
 
-print(
-    f"[PROFILE] "
-    f"load={data_load_ms:.2f}ms "
-    f"model={model_ms:.2f}ms "
-    f"audit={audit_ms:.2f}ms "
-    f"response={response_ms:.2f}ms "
-    f"total={total_ms:.2f}ms"
-)
+        total_ms = (time.time() - request_start) * 1000
+
+        print(
+            f"[PROFILE] "
+            f"load={data_load_ms:.2f}ms "
+            f"model={model_ms:.2f}ms "
+            f"audit={audit_ms:.2f}ms "
+            f"response={response_ms:.2f}ms "
+            f"total={total_ms:.2f}ms"
+        )
+
+        return {
+            "total": TOTAL_APPLICATIONS,
+            "applications": applications
+        }
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
     except Exception as e:
         print(traceback.format_exc())
