@@ -515,21 +515,33 @@ def score_batch(req: BatchScoreRequest):
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
+    request_start = time.time()
     try:
+        t1 = time.time()
         rows_list = []
         for i in range(offset, offset + limit):
             row = applications_df.iloc[i % len(applications_df)].copy()
             row["application_id"] = f"APP-{i+1:06d}"
             rows_list.append(row)
         subset  = pd.DataFrame(rows_list)
+        data_load_ms = (time.time() - t1) * 1000
         app_ids = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
 
         # OPT-3: single batch model call instead of N parallel individual calls
+        t2 = time.time()
+
         score_map = generate_risk_scores_batch(app_ids)
 
+        model_ms = (time.time() - t2) * 1000
+
         # OPT-1: single DB query instead of N×2 serial queries
+        
+        t3 = time.time()
+
         audit_map = batch_get_audit_info(app_ids)
 
+        audit_ms = (time.time() - t3) * 1000
+        t4 = time.time()
         applications = []
         for _, row in subset.iterrows():
             app_id         = safe_str(row.get("application_id", ""))
@@ -553,6 +565,18 @@ def get_applications(limit: int = 10, offset: int = 0):
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
                 "decision_date":      audit_info.get("decision_date", ""),
             })
+response_ms = (time.time() - t4) * 1000
+
+total_ms = (time.time() - request_start) * 1000
+
+print(
+    f"[PROFILE] "
+    f"load={data_load_ms:.2f}ms "
+    f"model={model_ms:.2f}ms "
+    f"audit={audit_ms:.2f}ms "
+    f"response={response_ms:.2f}ms "
+    f"total={total_ms:.2f}ms"
+)
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
     except Exception as e:
         print(traceback.format_exc())
