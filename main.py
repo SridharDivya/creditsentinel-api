@@ -980,14 +980,14 @@ async def process_decision(application_id: str, req: DecisionRequest):
     # BUG-2 FIX: replaced asyncio.create_task(fire_and_forget_audit(...))
     # with a plain fire_and_forget_audit() call (thread-pool submit).
     # No event loop dependency — safe in all call contexts.
-    fire_and_forget_audit(audit_payload)
+    audit_id = _audit_worker(audit_payload)
 
     latency_ms = round((time.time() - decision_start) * 1000, 2)
     return {
         "application_id":    application_id,
         "applicant_name":    real_applicant_name,
         "analyst_name":      analyst_name,
-        "audit_id":          None,   # not waited for — audit writes in background
+        "audit_id":          audit_id,   # not waited for — audit writes in background
         "status":            decision.lower(),
         "next_action":       notification_type,
         "notification_sent": notification_sent,
