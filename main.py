@@ -484,8 +484,7 @@ def health():
         "model_loaded":       True,
         "total_applications": TOTAL_APPLICATIONS,
         "cibil_source":       "computed_from_foir_income_lti_loans_employment",
-        "optimizations":      ["batch_db_lookup", "lru_feature_cache",
-                               "batch_model_inference", "async_audit", "db_index"],
+       
     }
 
 # =========================================================
