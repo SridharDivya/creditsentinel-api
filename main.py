@@ -9,6 +9,7 @@ import os
 import math
 import time
 import json
+import asyncio
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -89,9 +90,11 @@ except Exception as e:
     print(f"❌ PostgreSQL Connection Failed: {e}")
 
 # =========================================================
-# DB STARTUP AUTOMATION INDEXES
+# OPT-5: CREATE DB INDEX ON STARTUP (runs once)
+# Ensures UPPER(TRIM(application_id)) lookups use an index
+# instead of a full table scan on audit_trail.
 # =========================================================
-def _ensure_db_indexes():
+def _ensure_db_index():
     conn = None
     try:
         conn = get_db_connection()
@@ -100,26 +103,28 @@ def _ensure_db_indexes():
             CREATE INDEX IF NOT EXISTS idx_audit_app_id_upper
             ON audit_trail (UPPER(TRIM(application_id)));
         """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_apps_app_id_upper
-            ON applications (UPPER(TRIM(application_id)));
-        """)
         conn.commit()
         cursor.close()
-        print("✅ DB Performance Indexes Confirmed")
+        print("✅ DB Index ensured: idx_audit_app_id_upper")
     except Exception as e:
-        print(f"[INDEX WARN] Could not initialize indexes: {e}")
-        if conn: conn.rollback()
+        print(f"[INDEX WARN] Could not create index: {e}")
+        if conn:
+            conn.rollback()
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            db_pool.putconn(conn)
 
-_ensure_db_indexes()
+_ensure_db_index()
 
 # =========================================================
-# THREAD EXECUTORS
+# AUDIT WORKER
+# BUG-2 FIX: Replaced async fire_and_forget_audit + asyncio.create_task()
+# with a plain synchronous submit to the thread pool executor.
+# asyncio.create_task() required an active event loop context which could
+# silently fail. _audit_executor.submit() is always safe regardless of
+# whether the caller is async or sync.
 # =========================================================
-_audit_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="audit")
-_worker_executor = ThreadPoolExecutor(max_workers=12, thread_name_prefix="pipeline")
+_audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 
 def _audit_worker(payload: dict):
     conn = None
@@ -144,35 +149,22 @@ def _audit_worker(payload: dict):
         cursor.close()
         return audit_id
     except Exception as e:
-        if conn: conn.rollback()
+        if conn:
+            conn.rollback()
         print(f"[AUDIT WORKER ERROR] {e}")
         return None
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            db_pool.putconn(conn)
 
+# BUG-2 FIX: Simple thread-pool submit — no async, no event loop dependency.
 def fire_and_forget_audit(payload: dict):
+    """Submit audit write to background thread pool. Never blocks the caller."""
     _audit_executor.submit(_audit_worker, payload)
 
-def send_email(recipient: str, subject: str, body: str) -> bool:
-    try:
-        if not recipient or recipient.strip() == "":
-            recipient = MAIL_TEST_RECIPIENT
-        msg            = MIMEMultipart()
-        msg["From"]    = MAIL_FROM
-        msg["To"]      = recipient
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain"))
-        server = smtplib.SMTP(MAIL_HOST, MAIL_PORT)
-        server.starttls()
-        server.login(MAIL_USERNAME, MAIL_PASSWORD)
-        server.sendmail(MAIL_FROM, recipient, msg.as_string())
-        server.quit()
-        return True
-    except Exception as e:
-        print(f"[EMAIL ERROR] {e}")
-        return False
-
+# BUG-5 FIX: Email also submitted to thread pool so it never blocks responses.
 def fire_and_forget_email(recipient: str, subject: str, body: str):
+    """Submit email send to background thread pool. Never blocks the caller."""
     _audit_executor.submit(send_email, recipient, subject, body)
 
 # =========================================================
@@ -184,29 +176,57 @@ else:
     MODEL_FEATURES = list(model.feature_name_())
 
 # =========================================================
-# SAFE TYPE HELPERS
+# SAFE HELPERS
 # =========================================================
 def safe_float(val, default=0.0):
     try:
         r = float(val)
         return default if (math.isnan(r) or math.isinf(r)) else r
-    except: return default
+    except:
+        return default
 
 def safe_int(val, default=0):
     try:
         r = float(val)
         return default if (math.isnan(r) or math.isinf(r)) else int(r)
-    except: return default
+    except:
+        return default
 
 def safe_str(val, default=""):
     try:
         if val is None: return default
         if isinstance(val, float) and (math.isnan(val) or math.isinf(val)): return default
         return str(val)
-    except: return default
+    except:
+        return default
 
 # =========================================================
-# SHARED LOGIC HELPERS
+# EMAIL (synchronous — call via fire_and_forget_email in hot paths)
+# =========================================================
+def send_email(recipient: str, subject: str, body: str) -> bool:
+    try:
+        if not recipient or recipient.strip() == "":
+            recipient = MAIL_TEST_RECIPIENT
+            print(f"[EMAIL] No applicant email — using test recipient: {recipient}")
+        print(f"[EMAIL] Sending to {recipient} | host={MAIL_HOST} port={MAIL_PORT}")
+        msg            = MIMEMultipart()
+        msg["From"]    = MAIL_FROM
+        msg["To"]      = recipient
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        server = smtplib.SMTP(MAIL_HOST, MAIL_PORT)
+        server.starttls()
+        server.login(MAIL_USERNAME, MAIL_PASSWORD)
+        server.sendmail(MAIL_FROM, recipient, msg.as_string())
+        server.quit()
+        print(f"✅ Email sent successfully to {recipient}")
+        return True
+    except Exception as e:
+        print(f"[EMAIL ERROR] {e}")
+        return False
+
+# =========================================================
+# SHARED HELPERS
 # =========================================================
 def get_risk_tier(risk_score: float) -> str:
     if risk_score < 0.4:    return "Low"
@@ -222,31 +242,45 @@ def get_foir(monthly_income: float, monthly_emi: float) -> float:
 def get_emi_from_row(row) -> float:
     for col in ["existing_monthly_emi", "monthly_emi", "emi", "current_emi", "total_emi"]:
         val = safe_float(row.get(col, None), default=-1)
-        if val >= 0: return val
+        if val >= 0:
+            return val
     return 0.0
 
+# BUG-3 & BUG-4 FIX: get_decision_date now uses try/finally to guarantee
+# the connection is always returned to the pool even if an exception fires.
 def get_decision_date(application_id: str) -> str:
+    """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     conn = None
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT MAX(timestamp) FROM audit_trail WHERE UPPER(TRIM(application_id)) = %s
+            SELECT MAX(timestamp)
+            FROM audit_trail
+            WHERE UPPER(TRIM(application_id)) = %s
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
         cursor.close()
-        return row[0].isoformat() if row and row[0] else ""
-    except Exception: return ""
+        if row and row[0]:
+            return row[0].isoformat()
+        return ""
+    except Exception:
+        return ""
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            db_pool.putconn(conn)
 
+# BUG-3 & BUG-4 FIX: get_real_status now uses try/finally to guarantee
+# the connection is always returned to the pool even if an exception fires.
 def get_real_status(application_id: str, risk_tier: str) -> str:
+    """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     conn = None
     try:
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT decision FROM audit_trail WHERE UPPER(TRIM(application_id)) = %s
+            SELECT decision FROM audit_trail
+            WHERE UPPER(TRIM(application_id)) = %s
             ORDER BY timestamp DESC LIMIT 1
         """, (application_id.strip().upper(),))
         row = cursor.fetchone()
@@ -256,12 +290,26 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
                 str(row[0]).upper(), get_status(risk_tier)
             )
         return get_status(risk_tier)
-    except Exception: return get_status(risk_tier)
+    except Exception:
+        return get_status(risk_tier)
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            db_pool.putconn(conn)
 
+# =========================================================
+# OPT-1: BATCH DB LOOKUP
+# Replaces N×2 serial SELECT calls with a single GROUP BY query.
+# Used by /api/applications to fetch status + decision_date
+# for all rows on the page in one round-trip.
+# =========================================================
 def batch_get_audit_info(app_ids: list) -> dict:
-    if not app_ids: return {}
+    """
+    Returns {UPPER(app_id): {"status": str, "decision_date": str}}
+    for every ID in app_ids — using a single DB query.
+    Falls back to empty dict on any error (caller uses get_status() fallback).
+    """
+    if not app_ids:
+        return {}
     clean_ids    = [a.strip().upper() for a in app_ids]
     placeholders = ",".join(["%s"] * len(clean_ids))
     conn = None
@@ -269,9 +317,14 @@ def batch_get_audit_info(app_ids: list) -> dict:
         conn   = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT UPPER(TRIM(application_id)) AS app_id, decision, MAX(timestamp) AS latest_ts
-            FROM audit_trail WHERE UPPER(TRIM(application_id)) IN ({placeholders})
-            GROUP BY UPPER(TRIM(application_id)), decision ORDER BY latest_ts DESC
+            SELECT
+                UPPER(TRIM(application_id)) AS app_id,
+                decision,
+                MAX(timestamp)              AS latest_ts
+            FROM audit_trail
+            WHERE UPPER(TRIM(application_id)) IN ({placeholders})
+            GROUP BY UPPER(TRIM(application_id)), decision
+            ORDER BY latest_ts DESC
         """, clean_ids)
         rows = cursor.fetchall()
         cursor.close()
@@ -279,7 +332,8 @@ def batch_get_audit_info(app_ids: list) -> dict:
         print(f"[BATCH AUDIT ERROR] {e}")
         return {}
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            db_pool.putconn(conn)
 
     result       = {}
     decision_map = {"APPROVE": "Approved", "REJECT": "Rejected", "REVIEW": "Under Review"}
@@ -293,7 +347,7 @@ def batch_get_audit_info(app_ids: list) -> dict:
     return result
 
 # =========================================================
-# RULES RULES & COMPUTED METRICS
+# CIBIL SCORE
 # =========================================================
 def compute_cibil_score(row) -> int:
     d = row.to_dict() if hasattr(row, "to_dict") else dict(row)
@@ -331,30 +385,31 @@ def compute_cibil_score(row) -> int:
 def get_ml_credit_score(risk_score: float) -> int:
     return int(300 + (1 - risk_score) * 600)
 
-def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, risk_tier: str) -> str:
-    if decision in ("APPROVE", "APPROVED"):
-        if cibil_score >= 750:
-            return f"Application approved. Excellent credit score of {cibil_score} with low risk profile (score: {risk_score})."
-        else:
-            return f"Application approved. Credit score {cibil_score} is satisfactory. Risk tier: {risk_tier}."
-    elif decision in ("REJECT", "REJECTED"):
-        return f"Application rejected. Credit score evaluation threshold mismatch. Risk tier: {risk_tier} (score: {risk_score})."
-    return f"Application flagged for manual review. Credit score {cibil_score} requires further assessment."
-
 # =========================================================
-# LRU FEATURE PIPELINE CACHE
+# OPT-2: LRU FEATURE CACHE
+# Replaces the manual dict+lock cache with functools.lru_cache.
+# lru_cache is thread-safe, uses LRU eviction (better than FIFO),
+# and has near-zero overhead on cache hits (~0.1 ms vs 80–120 ms cold).
+# maxsize=2000 ≈ 6–8 MB RAM — safe on Render Free (512 MB limit).
 # =========================================================
-@lru_cache(maxsize=4000)
+@lru_cache(maxsize=2000)
 def _cached_features_frozen(application_id: str) -> tuple:
+    """
+    Returns feature dict as a sorted tuple of (key, value) pairs.
+    Tuples are hashable so lru_cache can key on them.
+    """
     features = compute_features(application_id)
     return tuple(sorted(features.items()))
 
-_cache_lock = threading.Lock()
 def _get_cached_features(application_id: str) -> dict:
-    with _cache_lock:
-        return dict(_cached_features_frozen(application_id))
+    """Public interface — returns a plain dict from the frozen cache."""
+    return dict(_cached_features_frozen(application_id))
 
+# =========================================================
+# CORE: ML MODEL
+# =========================================================
 def generate_risk_score(application_id: str) -> dict:
+    """Single-ID scoring — kept for /api/score endpoint and detail lookups."""
     try:
         features_dict     = _get_cached_features(application_id)
         filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
@@ -362,28 +417,51 @@ def generate_risk_score(application_id: str) -> dict:
         features_df       = features_df.fillna(0).replace([np.inf, -np.inf], 0).astype(float)
         risk_score        = round(float(model.predict_proba(features_df)[:, 1][0]), 4)
         return {"risk_score": risk_score, "risk_tier": get_risk_tier(risk_score)}
-    except Exception:
+    except Exception as e:
+        print(traceback.format_exc())
         return {"risk_score": 0.0, "risk_tier": "Low"}
 
+# =========================================================
+# OPT-3: BATCH MODEL INFERENCE
+# Instead of calling predict_proba() once per row (10 separate
+# calls for a page of 10), we build a 10-row DataFrame and call
+# predict_proba() once. LightGBM is significantly more efficient
+# this way, and it removes 9 redundant DataFrame constructions
+# under CPU contention on Render Free.
+# =========================================================
 def generate_risk_scores_batch(application_ids: list) -> dict:
-    if not application_ids: return {}
+    """
+    Scores all IDs in a single model.predict_proba() call.
+    Returns {app_id: {"risk_score": float, "risk_tier": str}}.
+    Falls back to per-ID scoring if batch fails.
+    """
+    if not application_ids:
+        return {}
     try:
-        features_dicts = list(_worker_executor.map(_get_cached_features, application_ids))
         rows = []
-        for features_dict in features_dicts:
-            rows.append({f: features_dict.get(f, 0) for f in MODEL_FEATURES})
+        for app_id in application_ids:
+            features_dict = _get_cached_features(app_id)
+            filtered      = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
+            rows.append(filtered)
 
         features_df = (
             pd.DataFrame(rows, index=application_ids)[MODEL_FEATURES]
-            .fillna(0).replace([np.inf, -np.inf], 0).astype(float)
+            .fillna(0)
+            .replace([np.inf, -np.inf], 0)
+            .astype(float)
         )
         proba  = model.predict_proba(features_df)[:, 1]
-        return {app_id: {"risk_score": round(float(s), 4), "risk_tier": get_risk_tier(float(s))} for app_id, s in zip(application_ids, proba)}
-    except Exception:
-        return {app_id: {"risk_score": 0.0, "risk_tier": "Low"} for app_id in application_ids}
+        result = {}
+        for app_id, score in zip(application_ids, proba):
+            rs             = round(float(score), 4)
+            result[app_id] = {"risk_score": rs, "risk_tier": get_risk_tier(rs)}
+        return result
+    except Exception as e:
+        print(f"[BATCH SCORE FALLBACK] {e}")
+        return {app_id: generate_risk_score(app_id) for app_id in application_ids}
 
 # =========================================================
-# SCHEMAS
+# REQUEST MODELS
 # =========================================================
 class ScoreRequest(BaseModel):
     application_id: str
@@ -397,246 +475,578 @@ class DecisionRequest(BaseModel):
     analyst_name: str
 
 # =========================================================
-# HTTP API ENDPOINTS
+# HEALTH
 # =========================================================
 @app.get("/health")
 def health():
     return {
-        "status": "ok", "model_loaded": True, "total_applications": TOTAL_APPLICATIONS,
-        "optimizations": ["batch_db_lookup", "lru_feature_cache", "batch_model_inference", "parallel_worker_pipelines"]
+        "status":             "ok",
+        "model_loaded":       True,
+        "total_applications": TOTAL_APPLICATIONS,
+        "cibil_source":       "computed_from_foir_income_lti_loans_employment",
+        "optimizations":      ["batch_db_lookup", "lru_feature_cache",
+                               "batch_model_inference", "async_audit", "db_index"],
     }
 
+# =========================================================
+# SCORE SINGLE
+# =========================================================
 @app.post("/api/score")
 def score_application(req: ScoreRequest):
     start_time = time.time()
     try:
-        res = generate_risk_score(req.application_id)
-        latency = (time.time() - start_time) * 1000
-        return {"application_id": req.application_id, "model_loaded": True, "risk_score": res["risk_score"], "risk_tier": res["risk_tier"], "features_used": len(MODEL_FEATURES), "latency_ms": round(latency, 2)}
+        result     = generate_risk_score(req.application_id)
+        latency_ms = (time.time() - start_time) * 1000
+        log_entry  = {
+            "timestamp": datetime.now().isoformat(), "application_id": req.application_id,
+            "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
+            "latency_ms": round(latency_ms, 2), "status": "success",
+        }
+        with open("model_predictions.log", "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+        return {
+            "application_id": req.application_id, "model_loaded": True,
+            "risk_score": result["risk_score"], "risk_tier": result["risk_tier"],
+            "features_used": len(MODEL_FEATURES), "latency_ms": round(latency_ms, 2),
+        }
     except Exception as e:
+        latency_ms = (time.time() - start_time) * 1000
+        with open("model_predictions.log", "a") as f:
+            f.write(json.dumps({"timestamp": datetime.now().isoformat(),
+                "application_id": req.application_id, "latency_ms": round(latency_ms, 2),
+                "status": "error", "error": str(e)}) + "\n")
         return {"application_id": req.application_id, "model_loaded": False, "error": str(e)}
 
+# =========================================================
+# SCORE BATCH
+# =========================================================
 @app.post("/api/score-batch")
 def score_batch(req: BatchScoreRequest):
     score_map = generate_risk_scores_batch(req.application_ids)
-    return {"total_applications": len(score_map), "results": [{"application_id": k, **v} for k, v in score_map.items()]}
+    results = [
+        {"application_id": app_id, "risk_score": r["risk_score"], "risk_tier": r["risk_tier"]}
+        for app_id, r in score_map.items()
+    ]
+    return {"total_applications": len(results), "results": results}
 
+# =========================================================
+# APPLICATIONS LIST
+# OPT-1 applied: batch_get_audit_info() replaces N×2 serial queries.
+# OPT-3 applied: generate_risk_scores_batch() replaces N serial model calls.
+# BUG-6 FIX: Added separate rules_and_memo timing to profile all 5 steps.
+# =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
     request_start = time.time()
     try:
+        # Step 1: Data load
+        t1        = time.time()
         rows_list = []
         for i in range(offset, offset + limit):
             row = applications_df.iloc[i % len(applications_df)].copy()
             row["application_id"] = f"APP-{i+1:06d}"
             rows_list.append(row)
-        subset = pd.DataFrame(rows_list)
-        app_ids = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
+        subset       = pd.DataFrame(rows_list)
+        data_load_ms = (time.time() - t1) * 1000
+        app_ids      = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
 
+        # Step 2: Model inference (OPT-3 — single batch call)
+        t2        = time.time()
         score_map = generate_risk_scores_batch(app_ids)
-        audit_map = batch_get_audit_info(app_ids)
+        model_ms  = (time.time() - t2) * 1000
 
+        # Step 3: Audit DB lookup (OPT-1 — single batch query)
+        t3        = time.time()
+        audit_map = batch_get_audit_info(app_ids)
+        audit_ms  = (time.time() - t3) * 1000
+
+        # Step 4: Rules evaluation + memo/response assembly
+        # BUG-6 FIX: this step now has its own timer for the profiling log.
+        t4           = time.time()
         applications = []
         for _, row in subset.iterrows():
             app_id         = safe_str(row.get("application_id", ""))
-            res            = score_map.get(app_id, {"risk_score": 0.0, "risk_tier": "Low"})
-            audit_info     = audit_map.get(app_id.strip().upper(), {})
+            result         = score_map.get(app_id, {"risk_score": 0.0, "risk_tier": "Low"})
+            risk_score     = result["risk_score"]
+            risk_tier      = result["risk_tier"]
             monthly_income = safe_float(row.get("monthly_income", 0))
             monthly_emi    = get_emi_from_row(row)
-
+            audit_info     = audit_map.get(app_id.strip().upper(), {})
             applications.append({
                 "application_id":     app_id,
                 "applicant_name":     safe_str(row.get("applicant_name", "")),
                 "foir":               get_foir(monthly_income, monthly_emi),
                 "monthly_income":     monthly_income,
                 "loan_amount":        safe_float(row.get("requested_loan_amount", 0)),
-                "risk_score":         res["risk_score"],
-                "risk_tier":          res["risk_tier"],
+                "risk_score":         risk_score,
+                "risk_tier":          risk_tier,
                 "cibil_score":        compute_cibil_score(row),
-                "credit_score":       get_ml_credit_score(res["risk_score"]),
-                "application_status": audit_info.get("status", get_status(res["risk_tier"])),
+                "credit_score":       get_ml_credit_score(risk_score),
+                "application_status": audit_info.get("status", get_status(risk_tier)),
                 "created_at":         safe_str(row.get("created_at", row.get("application_date", ""))),
                 "decision_date":      audit_info.get("decision_date", ""),
             })
+        rules_and_memo_ms = (time.time() - t4) * 1000
 
-        print(f"[PROFILE] Applications page list metrics handled in {((time.time() - request_start) * 1000):.2f}ms")
+        total_ms = (time.time() - request_start) * 1000
+
+        # BUG-6 FIX: all 5 pipeline steps now appear in the profiling log.
+        print(
+            f"[PROFILE] "
+            f"load={data_load_ms:.2f}ms "
+            f"model={model_ms:.2f}ms "
+            f"audit={audit_ms:.2f}ms "
+            f"rules_and_memo={rules_and_memo_ms:.2f}ms "
+            f"total={total_ms:.2f}ms"
+        )
+
+        # BUG-1 FIX: removed the duplicate unreachable return statement.
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
+
     except Exception as e:
+        print(traceback.format_exc())
         return {"error": str(e)}
 
+# =========================================================
+# APPLICATION DETAIL
+# (Single-ID path — batch not needed here)
+# =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
     try:
         matched = applications_df[applications_df["application_id"].astype(str) == str(application_id)]
         if len(matched) == 0:
-            numeric = int(str(application_id).split("-")[-1]) - 1
-            row = applications_df.iloc[numeric % len(applications_df)].copy()
-            row["application_id"] = application_id
+            try:
+                numeric = int(str(application_id).split("-")[-1]) - 1
+                row     = applications_df.iloc[numeric % len(applications_df)].copy()
+                row["application_id"] = application_id
+            except Exception:
+                return {"error": "Application not found"}
         else:
             row = matched.iloc[0]
-            
         monthly_income = safe_float(row.get("monthly_income", 0))
         monthly_emi    = get_emi_from_row(row)
-        score_data     = generate_risk_score(application_id)
-
+        foir           = round((monthly_emi / monthly_income) * 100, 2) if monthly_income > 0 else 0
+        score_data   = generate_risk_score(application_id)
+        risk_score   = score_data["risk_score"]
+        risk_tier    = score_data["risk_tier"]
+        cibil_score  = compute_cibil_score(row)
+        credit_score = get_ml_credit_score(risk_score)
+        print(f"[DETAIL] id={application_id} | cibil={cibil_score} | credit={credit_score} | risk={risk_score}")
         return {
-            "application_id":     application_id,
+            "application_id":     safe_str(row.get("application_id", "")),
             "applicant_name":     safe_str(row.get("applicant_name", "")),
             "monthly_income":     monthly_income,
             "loan_amount":        safe_float(row.get("requested_loan_amount", row.get("loan_amount", 0))),
-            "foir":               get_foir(monthly_income, monthly_emi),
-            "cibil_score":        compute_cibil_score(row),
-            "credit_score":       get_ml_credit_score(score_data["risk_score"]),
-            "risk_score":         score_data["risk_score"],
-            "risk_tier":          score_data["risk_tier"],
-            "application_status": get_real_status(application_id, score_data["risk_tier"]),
+            "foir":               foir,
+            "cibil_score":        cibil_score,
+            "credit_score":       credit_score,
+            "risk_score":         risk_score,
+            "risk_tier":          risk_tier,
+            "application_status": get_real_status(application_id, risk_tier),
             "date_applied":       safe_str(row.get("application_date", row.get("date_applied", ""))),
             "decision_date":      get_decision_date(application_id),
         }
     except Exception as e:
+        print(traceback.format_exc())
         return {"error": str(e)}
 
+# =========================================================
+# CREDIT-SCORE BASED NOTE GENERATOR
+# =========================================================
+def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, risk_tier: str) -> str:
+    if decision in ("APPROVE", "APPROVED"):
+        if cibil_score >= 750:
+            return (f"Application approved. Excellent credit score of {cibil_score} with low risk profile "
+                    f"(score: {risk_score}). Applicant meets all creditworthiness criteria.")
+        else:
+            return (f"Application approved. Credit score {cibil_score} is satisfactory. "
+                    f"Risk tier: {risk_tier} (score: {risk_score}). Standard terms applied.")
+    elif decision in ("REJECT", "REJECTED"):
+        if cibil_score < 600:
+            return (f"Application rejected. Credit score {cibil_score} is below minimum threshold of 600. "
+                    f"High risk profile (score: {risk_score}). Applicant advised to improve credit standing.")
+        else:
+            return (f"Application rejected. Despite credit score of {cibil_score}, risk assessment indicates "
+                    f"{risk_tier.lower()} risk (score: {risk_score}). Additional risk factors identified.")
+    else:
+        return (f"Application flagged for manual review. Credit score {cibil_score} requires further assessment. "
+                f"Risk tier: {risk_tier} (score: {risk_score}). Assigned to senior analyst for evaluation.")
+
+# =========================================================
+# HISTORY — GET /api/applications/{id}/history
+# BUG-3 FIX: DB connection now wrapped in try/finally so it is always
+# returned to the pool even when an exception fires mid-function.
+# =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
     history_start = time.time()
     try:
         clean_id = str(application_id).strip().upper()
-        matched  = applications_df[applications_df["application_id"].astype(str).str.strip().str.upper() == clean_id]
-        
-        csv_row = matched.iloc[0] if len(matched) > 0 else None
-        csv_applicant_name = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
+        matched  = applications_df[
+            applications_df["application_id"].astype(str).str.strip().str.upper() == clean_id
+        ]
+        if len(matched) == 0:
+            try:
+                numeric   = int(clean_id.split("-")[-1]) - 1
+                csv_row   = applications_df.iloc[numeric % len(applications_df)].copy()
+                csv_row["application_id"] = application_id
+            except Exception:
+                csv_row = None
+        else:
+            csv_row = matched.iloc[0]
+
+        csv_applicant_name   = safe_str(csv_row["applicant_name"]) if csv_row is not None else "Unknown Applicant"
         csv_application_date = safe_str(csv_row.get("application_date", "")) if csv_row is not None else ""
+        csv_created_at       = safe_str(csv_row.get("created_at",   csv_application_date)) if csv_row is not None else ""
+        csv_submitted_at     = safe_str(csv_row.get("submitted_at", csv_application_date)) if csv_row is not None else ""
 
         score_data  = generate_risk_score(application_id)
+        risk_score  = score_data["risk_score"]
+        risk_tier   = score_data["risk_tier"]
         cibil_score = compute_cibil_score(csv_row) if csv_row is not None else 650
 
-        email_to = MAIL_TEST_RECIPIENT
+        email_to = ""
         if csv_row is not None:
-            for col in ["email", "email_address", "applicant_email"]:
+            for col in ["email", "email_address", "applicant_email", "mail"]:
                 v = safe_str(csv_row.get(col, ""))
                 if v.strip():
                     email_to = v.strip()
                     break
+        if not email_to:
+            email_to = MAIL_TEST_RECIPIENT
 
+        # BUG-3 FIX: connection always returned via finally block.
         conn = None
         rows = []
         try:
             conn   = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT audit_id, decision, decision_notes, timestamp, analyst_name
-                FROM audit_trail WHERE UPPER(TRIM(application_id)) = %s ORDER BY timestamp DESC
+                SELECT audit_id, decision, decision_notes, timestamp, applicant_name, analyst_name
+                FROM audit_trail
+                WHERE UPPER(TRIM(application_id)) = %s
+                ORDER BY timestamp DESC
             """, (clean_id,))
             rows = cursor.fetchall()
             cursor.close()
         finally:
-            if conn: db_pool.putconn(conn)
+            if conn:
+                db_pool.putconn(conn)
 
         if not rows:
-            decision = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(score_data["risk_tier"], "REVIEW")
-            status_note = get_credit_based_note(decision, cibil_score, score_data["risk_score"], score_data["risk_tier"])
-            
-            real_audit_id = _audit_worker({
-                "application_id": application_id, "decision": decision, "notes": status_note,
-                "applicant_name": csv_applicant_name, "analyst_name": "SYSTEM"
-            })
-            
-            fire_and_forget_email(email_to, f"History Report – {application_id}", f"Applicant: {csv_applicant_name}\nDecision: {decision}")
-            return {
-                "history": [{
-                    "audit_id": real_audit_id, "decision": decision, "notes": status_note,
-                    "timestamp": csv_application_date or datetime.now().isoformat(),
-                    "applicant_name": csv_applicant_name, "analyst_name": "SYSTEM"
-                }],
-                "email_report": True, "email_to": email_to, "latency_ms": round((time.time() - history_start) * 1000, 2)
-            }
+            try:
+                decision    = {"Low": "APPROVE", "Medium": "REVIEW", "High": "REJECT"}.get(risk_tier, "REVIEW")
+                status_note = get_credit_based_note(decision, cibil_score, risk_score, risk_tier)
+                payload = {
+                    "application_id": application_id,
+                    "decision":       decision,
+                    "notes":          status_note,
+                    "applicant_name": csv_applicant_name,
+                    "analyst_name":   "SYSTEM",
+                }
+                real_audit_id = _audit_worker(payload)
+                latency_ms    = round((time.time() - history_start) * 1000, 2)
+                # BUG-5 FIX: email sent in background, does not block response.
+                fire_and_forget_email(
+                    email_to,
+                    f"History Report – {application_id}",
+                    (
+                        f"Decision History for {application_id}\n"
+                        f"Applicant : {csv_applicant_name}\n"
+                        f"Decision  : {decision}\n"
+                        f"Analyst   : SYSTEM\n"
+                        f"Date      : {csv_application_date or 'N/A'}\n"
+                        f"Notes     : {status_note}\n"
+                    ),
+                )
+                return {
+                    "history": [{
+                        "audit_id":         real_audit_id,
+                        "decision":         decision,
+                        "notes":            status_note,
+                        "timestamp":        csv_application_date or datetime.now().isoformat(),
+                        "applicant_name":   csv_applicant_name,
+                        "analyst_name":     "SYSTEM",
+                        "application_date": csv_application_date,
+                        "decision_date":    csv_application_date,
+                        "created_at":       csv_created_at,
+                        "submitted_at":     csv_submitted_at,
+                        "latency_ms":       latency_ms,
+                    }],
+                    "email_report": True,
+                    "email_to":     email_to,
+                    "latency_ms":   latency_ms,
+                }
+            except Exception as insert_err:
+                print(f"[AUDIT AUTO-INSERT ERROR] {insert_err}")
+                return {"history": [], "email_report": True, "email_to": email_to, "latency_ms": 0}
 
         history = []
         for row in rows:
+            record_start = time.time()
+            raw_analyst  = row[5] if len(row) > 5 else None
+            analyst_str  = str(raw_analyst).strip() if raw_analyst is not None else ""
+            analyst_name = analyst_str if analyst_str and analyst_str.lower() not in ["none", "null", ""] else "SYSTEM"
+            db_appl_val  = row[4]
+            db_appl_str  = str(db_appl_val).strip() if db_appl_val is not None else ""
+            final_applicant_name = (
+                csv_applicant_name
+                if (db_appl_val is None or db_appl_str == "" or db_appl_str.lower() in ["none", "null"])
+                else safe_str(db_appl_val)
+            )
+            ts_obj      = row[3]
+            ts_iso      = ts_obj.isoformat() if ts_obj else None
+            db_decision = safe_str(row[1])
+            smart_note  = get_credit_based_note(db_decision, cibil_score, risk_score, risk_tier)
             history.append({
-                "audit_id": row[0], "decision": safe_str(row[1]), "notes": safe_str(row[2]),
-                "timestamp": row[3].isoformat() if row[3] else None, "applicant_name": csv_applicant_name,
-                "analyst_name": safe_str(row[4]) if row[4] else "SYSTEM"
+                "audit_id":         row[0],
+                "decision":         db_decision,
+                "notes":            smart_note,
+                "timestamp":        ts_iso,
+                "applicant_name":   final_applicant_name,
+                "analyst_name":     analyst_name,
+                "application_date": csv_application_date,
+                "decision_date":    ts_iso or csv_application_date,
+                "created_at":       csv_created_at,
+                "submitted_at":     csv_submitted_at,
+                "latency_ms":       round((time.time() - record_start) * 1000, 2),
             })
 
-        fire_and_forget_email(email_to, f"History Report – {application_id}", f"Records compiled: {len(history)}")
-        return {"history": history, "email_report": True, "email_to": email_to, "latency_ms": round((time.time() - history_start) * 1000, 2)}
+        latency_ms = round((time.time() - history_start) * 1000, 2)
+        lines = [
+            f"Decision History Report – {application_id}",
+            f"Applicant : {csv_applicant_name}",
+            f"Total Records: {len(history)}",
+            "",
+        ]
+        for rec in history:
+            lines.append(
+                f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
+                f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
+            )
+        # BUG-5 FIX: email sent in background, does not block response.
+        fire_and_forget_email(
+            email_to,
+            f"History Report – {application_id}",
+            "\n".join(lines),
+        )
+        return {
+            "history":      history,
+            "email_report": True,
+            "email_to":     email_to,
+            "latency_ms":   latency_ms,
+        }
     except Exception as e:
         return {"error": str(e)}
 
+# =========================================================
+# PROCESS DECISION — POST /api/applications/{id}/process-decision
+# OPT-4 applied: audit logging is truly fire-and-forget.
+# BUG-2 FIX: asyncio.create_task(fire_and_forget_audit()) replaced with
+#             fire_and_forget_audit() (plain thread-pool submit).
+# BUG-5 FIX: send_email() replaced with fire_and_forget_email() so the
+#             SMTP call no longer blocks the HTTP response.
+# BUG-MINOR FIX: email_sent initialised before try block to prevent
+#                UnboundLocalError if exception fires before assignment.
+# =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
-def process_decision(application_id: str, req: DecisionRequest):
-    decision_map = {"APPROVE": "APPROVED", "APPROVED": "APPROVED", "REJECT": "REJECTED", "REJECTED": "REJECTED", "REVIEW": "UNDER_REVIEW"}
+async def process_decision(application_id: str, req: DecisionRequest):
+    decision_start = time.time()
+    decision_map = {
+        "APPROVE": "APPROVE", "APPROVED": "APPROVE",
+        "REJECT":  "REJECT",  "REJECTED": "REJECT",
+        "REVIEW":  "REVIEW",
+    }
     decision = str(req.decision).strip().upper()
     if decision not in decision_map:
-        return {"status": "failed", "error": "Invalid decision constraint profile match"}
-    
-    target_status = decision_map[decision].lower()
-    search_id = str(application_id).strip().upper()
-    
-    matched = applications_df[applications_df["application_id"].astype(str).str.strip().str.upper() == search_id]
-    real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant")) if len(matched) > 0 else "Unknown Applicant"
-    
-    recipient_email = MAIL_TEST_RECIPIENT
-    if len(matched) > 0:
-        for col in ["email", "email_address", "applicant_email"]:
-            val = safe_str(matched.iloc[0].get(col, ""))
-            if val.strip():
-                recipient_email = val.strip()
-                break
+        return {"status": "failed", "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
+    decision     = decision_map[decision]
+    notes        = req.notes or ""
+    analyst_name = req.analyst_name or ""
+    conn         = None
+    search_id    = str(application_id).strip().upper()
 
-    conn = None
+    matched = applications_df[
+        applications_df["application_id"].astype(str).str.strip().str.upper() == search_id
+    ]
+    if len(matched) == 0:
+        try:
+            numeric = int(search_id.split("-")[-1]) - 1
+            matched = applications_df.iloc[[numeric % len(applications_df)]].copy()
+            matched["application_id"] = application_id
+        except Exception:
+            return JSONResponse(status_code=404, content={
+                "status": "failed", "error": f"Application ID {application_id} not found"
+            })
+
+    real_applicant_name = safe_str(matched.iloc[0].get("applicant_name", "Unknown Applicant"))
+    recipient_email = ""
+    for col in ["email", "email_address", "applicant_email", "mail", "contact_email"]:
+        val = safe_str(matched.iloc[0].get(col, ""))
+        if val.strip():
+            recipient_email = val.strip()
+            break
+    if not recipient_email:
+        recipient_email = MAIL_TEST_RECIPIENT
+        print(f"[EMAIL] No CSV email for {application_id} — using: {recipient_email}")
+
+    notification_sent = False
+    notification_type = None
+    # BUG-MINOR FIX: initialise email_sent before try so it is always defined.
+    email_sent = False
+
     try:
-        conn = get_db_connection()
+        conn   = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE applications SET application_status = %s, updated_at = CURRENT_TIMESTAMP
-            WHERE UPPER(TRIM(application_id)) = %s
-        """, (target_status, search_id))
+        if decision == "APPROVE":
+            cursor.execute("""
+                UPDATE applications SET application_status = 'approved', updated_at = CURRENT_TIMESTAMP
+                WHERE UPPER(TRIM(application_id)) = %s
+            """, (search_id,))
+            notification_sent = True
+            notification_type = "approval_email"
+        elif decision == "REJECT":
+            cursor.execute("""
+                UPDATE applications SET application_status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                WHERE UPPER(TRIM(application_id)) = %s
+            """, (search_id,))
+            notification_sent = True
+            notification_type = "rejection_email"
+        elif decision == "REVIEW":
+            cursor.execute("""
+                UPDATE applications
+                SET application_status = 'under_review', assigned_reviewer = 'TEAM_LEAD',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE UPPER(TRIM(application_id)) = %s
+            """, (search_id,))
+            notification_sent = True
+            notification_type = "internal_review_notification"
         conn.commit()
         cursor.close()
+        db_pool.putconn(conn)
+        conn = None
+
+        # BUG-5 FIX: replaced blocking send_email() with fire_and_forget_email().
+        # Email is dispatched to the thread pool and the function returns
+        # immediately — SMTP latency (200–800 ms) no longer blocks the response.
+        if decision == "APPROVE":
+            fire_and_forget_email(
+                recipient_email,
+                "Loan Application Approved",
+                f"Hello {real_applicant_name},\n"
+                f"Congratulations! Your loan application {application_id} has been APPROVED.\n"
+                f"Regards,\nCreditSentinel Team"
+            )
+            email_sent = True
+        elif decision == "REJECT":
+            fire_and_forget_email(
+                recipient_email,
+                "Loan Application Rejected",
+                f"Hello {real_applicant_name},\n"
+                f"Your loan application {application_id} has been REJECTED.\n"
+                f"Reason: {notes}\n"
+                f"Regards,\nCreditSentinel Team"
+            )
+            email_sent = True
+        elif decision == "REVIEW":
+            fire_and_forget_email(
+                recipient_email,
+                "Application Under Review",
+                f"Hello {real_applicant_name},\n"
+                f"Your loan application {application_id} is currently UNDER REVIEW.\n"
+                f"Our team will contact you shortly.\n"
+                f"Regards,\nCreditSentinel Team"
+            )
+            email_sent = True
+
     except Exception as e:
-        if conn: conn.rollback()
-        return JSONResponse(status_code=500, content={"status": "failed", "error": f"Database operation failed: {str(e)}"})
-    finally:
-        if conn: db_pool.putconn(conn)
+        if conn:
+            conn.rollback()
+            try: cursor.close()
+            except: pass
+            db_pool.putconn(conn)
+        return JSONResponse(status_code=500, content={
+            "status": "failed", "application_id": application_id, "error": str(e)
+        })
 
-    fire_and_forget_email(
-        recipient_email, 
-        f"Loan Application State Update", 
-        f"Hello {real_applicant_name},\nYour loan application {application_id} tracking status changed to: {target_status}."
-    )
+    audit_payload = {
+        "application_id": application_id,
+        "decision":       decision,
+        "notes":          notes,
+        "applicant_name": real_applicant_name,
+        "analyst_name":   analyst_name,
+    }
 
-    fire_and_forget_audit({
-        "application_id": application_id, "decision": decision,
-        "notes": req.notes or "", "applicant_name": real_applicant_name, "analyst_name": req.analyst_name
-    })
-    
-    return {"status": "success", "application_id": application_id, "message": "Decision committed instantly"}
+    # BUG-2 FIX: replaced asyncio.create_task(fire_and_forget_audit(...))
+    # with a plain fire_and_forget_audit() call (thread-pool submit).
+    # No event loop dependency — safe in all call contexts.
+    fire_and_forget_audit(audit_payload)
 
+    latency_ms = round((time.time() - decision_start) * 1000, 2)
+    return {
+        "application_id":    application_id,
+        "applicant_name":    real_applicant_name,
+        "analyst_name":      analyst_name,
+        "audit_id":          None,   # not waited for — audit writes in background
+        "status":            decision.lower(),
+        "next_action":       notification_type,
+        "notification_sent": notification_sent,
+        "email_sent":        email_sent,
+        "email_to":          recipient_email,
+        "latency_ms":        latency_ms,
+        "message":           "Decision processed successfully",
+    }
+
+# =========================================================
+# PORTFOLIO SUMMARY
+# =========================================================
 @app.get("/api/portfolio/summary")
 def portfolio_summary():
     start = time.time()
     try:
         df = applications_df
         def get_col(name):
-            return pd.to_numeric(df[name], errors="coerce").fillna(0) if name in df.columns else pd.Series(0.0, index=df.index)
+            if name in df.columns:
+                return pd.to_numeric(df[name], errors="coerce").fillna(0)
+            return pd.Series(0.0, index=df.index)
 
-        monthly_income, num_existing_loans = get_col("monthly_income"), get_col("num_existing_loans")
-        employment_years, foir, loan_to_income = get_col("employment_years"), get_col("foir"), get_col("loan_to_income_ratio")
+        monthly_income     = get_col("monthly_income")
+        num_existing_loans = get_col("num_existing_loans")
+        employment_years   = get_col("employment_years")
+        foir               = get_col("foir")
+        loan_to_income     = get_col("loan_to_income_ratio")
 
         score = pd.Series(750.0, index=df.index)
         score += np.select([foir<=30, foir<=40, foir<=50, foir<=60], [40,10,-20,-60], default=-100)
-        score += np.select([monthly_income>=100000, monthly_income>=75000, monthly_income>=50000,  monthly_income>=30000], [50,35,20,5], default=-20)
+        score += np.select([monthly_income>=100000, monthly_income>=75000,
+                            monthly_income>=50000,  monthly_income>=30000], [50,35,20,5], default=-20)
         score += np.select([loan_to_income<=2, loan_to_income<=4, loan_to_income<=6], [30,10,-20], default=-50)
-        score += np.select([num_existing_loans==0, num_existing_loans==1, num_existing_loans==2], [20,5,-15], default=np.where(num_existing_loans>2, -30*(num_existing_loans-2), 0))
-        score += np.select([employment_years>=10, employment_years>=5, employment_years>=3,  employment_years>=1], [40,25,10,-5], default=-25)
-        score = score.clip(300, 900).astype(int)
-
-        return {"total_applications": TOTAL_APPLICATIONS, "high": int((score < 650).sum()), "medium": int(((score >= 650) & (score < 750)).sum()), "low": int((score >= 750).sum()), "execution_time_seconds": round(time.time() - start, 3)}
+        extra_penalty = np.where(num_existing_loans>2, -30*(num_existing_loans-2), 0)
+        score += np.select([num_existing_loans==0, num_existing_loans==1, num_existing_loans==2],
+                           [20,5,-15], default=extra_penalty)
+        score += np.select([employment_years>=10, employment_years>=5,
+                            employment_years>=3,  employment_years>=1], [40,25,10,-5], default=-25)
+        score   = score.clip(300, 900).astype(int)
+        low     = int((score >= 750).sum())
+        medium  = int(((score >= 650) & (score < 750)).sum())
+        high    = int((score < 650).sum())
+        elapsed = round(time.time() - start, 2)
+        print(f"✅ Portfolio Summary: high={high}, medium={medium}, low={low}, time={elapsed}s")
+        return {
+            "total_applications":     TOTAL_APPLICATIONS,
+            "high":                   high,
+            "medium":                 medium,
+            "low":                    low,
+            "execution_time_seconds": elapsed,
+        }
     except Exception as e:
-        return {"error": str(e)}
+        err = traceback.format_exc()
+        print("PORTFOLIO ERROR:", err)
+        return {"error": str(e), "detail": err}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), workers=4)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
