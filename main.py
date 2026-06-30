@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -850,11 +850,7 @@ def get_decision_history(application_id: str):
 #                UnboundLocalError if exception fires before assignment.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
-async def process_decision(
-    application_id: str,
-    req: DecisionRequest,
-    x_analyst_name: str = Header(default="", alias="X-Analyst-Name")
-):
+async def process_decision(application_id: str, req: DecisionRequest, request: Request):
     decision_start = time.time()
     decision_map = {
         "APPROVE": "APPROVE", "APPROVED": "APPROVE",
@@ -869,9 +865,8 @@ async def process_decision(
 
     # PRACTICAL FIX (Week 7 sprint): analyst_name now comes from the
     # X-Analyst-Name request header instead of the request body, since
-    # there is no auth system yet. Declared via Header() so it shows up
-    # as a documented, fillable field in Swagger UI (/docs).
-    analyst_name = x_analyst_name
+    # there is no auth system yet.
+    analyst_name = request.headers.get("X-Analyst-Name", "")
 
     if not analyst_name or analyst_name.lower() in ("none", "null", "undefined"):
         return JSONResponse(status_code=400, content={
