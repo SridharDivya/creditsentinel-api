@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -11,6 +12,7 @@ import time
 import json
 import asyncio
 import threading
+import jwt  # pip install PyJWT
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -66,6 +68,35 @@ MAIL_FROM           = os.getenv("MAIL_FROM", "noreply@creditsentinel.com")
 MAIL_TEST_RECIPIENT = os.getenv("MAIL_TEST_RECIPIENT", "test@inbox.mailtrap.io")
 
 # =========================================================
+# AUTH CONFIG (JWT)
+# =========================================================
+# IMPORTANT: set JWT_SECRET_KEY as a real env var in production.
+# Never ship the fallback value below to production.
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")
+JWT_ALGORITHM  = os.getenv("JWT_ALGORITHM", "HS256")
+
+bearer_scheme = HTTPBearer()
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> dict:
+    """
+    Decodes and validates the JWT from the Authorization: Bearer <token> header.
+    Expects the token payload to contain at least a 'name' or 'email' claim
+    identifying the analyst. Raises 401 on missing/invalid/expired tokens.
+    """
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    if not payload.get("name") and not payload.get("email"):
+        raise HTTPException(status_code=401, detail="Token missing analyst identity claim")
+
+    return payload
+
+# =========================================================
 # DB POOL
 # =========================================================
 db_pool = pool.ThreadedConnectionPool(
@@ -118,11 +149,6 @@ _ensure_db_index()
 
 # =========================================================
 # AUDIT WORKER
-# BUG-2 FIX: Replaced async fire_and_forget_audit + asyncio.create_task()
-# with a plain synchronous submit to the thread pool executor.
-# asyncio.create_task() required an active event loop context which could
-# silently fail. _audit_executor.submit() is always safe regardless of
-# whether the caller is async or sync.
 # =========================================================
 _audit_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="audit")
 
@@ -157,12 +183,10 @@ def _audit_worker(payload: dict):
         if conn:
             db_pool.putconn(conn)
 
-# BUG-2 FIX: Simple thread-pool submit — no async, no event loop dependency.
 def fire_and_forget_audit(payload: dict):
     """Submit audit write to background thread pool. Never blocks the caller."""
     _audit_executor.submit(_audit_worker, payload)
 
-# BUG-5 FIX: Email also submitted to thread pool so it never blocks responses.
 def fire_and_forget_email(recipient: str, subject: str, body: str):
     """Submit email send to background thread pool. Never blocks the caller."""
     _audit_executor.submit(send_email, recipient, subject, body)
@@ -246,8 +270,6 @@ def get_emi_from_row(row) -> float:
             return val
     return 0.0
 
-# BUG-3 & BUG-4 FIX: get_decision_date now uses try/finally to guarantee
-# the connection is always returned to the pool even if an exception fires.
 def get_decision_date(application_id: str) -> str:
     """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     conn = None
@@ -270,8 +292,6 @@ def get_decision_date(application_id: str) -> str:
         if conn:
             db_pool.putconn(conn)
 
-# BUG-3 & BUG-4 FIX: get_real_status now uses try/finally to guarantee
-# the connection is always returned to the pool even if an exception fires.
 def get_real_status(application_id: str, risk_tier: str) -> str:
     """Single-ID lookup — used only by detail endpoint where batch is not applicable."""
     conn = None
@@ -298,16 +318,8 @@ def get_real_status(application_id: str, risk_tier: str) -> str:
 
 # =========================================================
 # OPT-1: BATCH DB LOOKUP
-# Replaces N×2 serial SELECT calls with a single GROUP BY query.
-# Used by /api/applications to fetch status + decision_date
-# for all rows on the page in one round-trip.
 # =========================================================
 def batch_get_audit_info(app_ids: list) -> dict:
-    """
-    Returns {UPPER(app_id): {"status": str, "decision_date": str}}
-    for every ID in app_ids — using a single DB query.
-    Falls back to empty dict on any error (caller uses get_status() fallback).
-    """
     if not app_ids:
         return {}
     clean_ids    = [a.strip().upper() for a in app_ids]
@@ -387,29 +399,19 @@ def get_ml_credit_score(risk_score: float) -> int:
 
 # =========================================================
 # OPT-2: LRU FEATURE CACHE
-# Replaces the manual dict+lock cache with functools.lru_cache.
-# lru_cache is thread-safe, uses LRU eviction (better than FIFO),
-# and has near-zero overhead on cache hits (~0.1 ms vs 80–120 ms cold).
-# maxsize=2000 ≈ 6–8 MB RAM — safe on Render Free (512 MB limit).
 # =========================================================
 @lru_cache(maxsize=2000)
 def _cached_features_frozen(application_id: str) -> tuple:
-    """
-    Returns feature dict as a sorted tuple of (key, value) pairs.
-    Tuples are hashable so lru_cache can key on them.
-    """
     features = compute_features(application_id)
     return tuple(sorted(features.items()))
 
 def _get_cached_features(application_id: str) -> dict:
-    """Public interface — returns a plain dict from the frozen cache."""
     return dict(_cached_features_frozen(application_id))
 
 # =========================================================
 # CORE: ML MODEL
 # =========================================================
 def generate_risk_score(application_id: str) -> dict:
-    """Single-ID scoring — kept for /api/score endpoint and detail lookups."""
     try:
         features_dict     = _get_cached_features(application_id)
         filtered_features = {f: features_dict.get(f, 0) for f in MODEL_FEATURES}
@@ -423,18 +425,8 @@ def generate_risk_score(application_id: str) -> dict:
 
 # =========================================================
 # OPT-3: BATCH MODEL INFERENCE
-# Instead of calling predict_proba() once per row (10 separate
-# calls for a page of 10), we build a 10-row DataFrame and call
-# predict_proba() once. LightGBM is significantly more efficient
-# this way, and it removes 9 redundant DataFrame constructions
-# under CPU contention on Render Free.
 # =========================================================
 def generate_risk_scores_batch(application_ids: list) -> dict:
-    """
-    Scores all IDs in a single model.predict_proba() call.
-    Returns {app_id: {"risk_score": float, "risk_tier": str}}.
-    Falls back to per-ID scoring if batch fails.
-    """
     if not application_ids:
         return {}
     try:
@@ -470,9 +462,11 @@ class BatchScoreRequest(BaseModel):
     application_ids: List[str]
 
 class DecisionRequest(BaseModel):
-    decision:     str
-    notes:        Optional[str] = ""
-    analyst_name: str
+    decision: str
+    notes:    Optional[str] = ""
+    # analyst_name removed: it is now sourced from the authenticated
+    # JWT via get_current_user(), not from client-supplied input.
+    # This prevents analysts from spoofing each other's names.
 
 # =========================================================
 # HEALTH
@@ -484,7 +478,7 @@ def health():
         "model_loaded":       True,
         "total_applications": TOTAL_APPLICATIONS,
         "cibil_source":       "computed_from_foir_income_lti_loans_employment",
-       
+
     }
 
 # =========================================================
@@ -530,15 +524,11 @@ def score_batch(req: BatchScoreRequest):
 
 # =========================================================
 # APPLICATIONS LIST
-# OPT-1 applied: batch_get_audit_info() replaces N×2 serial queries.
-# OPT-3 applied: generate_risk_scores_batch() replaces N serial model calls.
-# BUG-6 FIX: Added separate rules_and_memo timing to profile all 5 steps.
 # =========================================================
 @app.get("/api/applications")
 def get_applications(limit: int = 10, offset: int = 0):
     request_start = time.time()
     try:
-        # Step 1: Data load
         t1        = time.time()
         rows_list = []
         for i in range(offset, offset + limit):
@@ -549,18 +539,14 @@ def get_applications(limit: int = 10, offset: int = 0):
         data_load_ms = (time.time() - t1) * 1000
         app_ids      = [safe_str(row.get("application_id", "")) for _, row in subset.iterrows()]
 
-        # Step 2: Model inference (OPT-3 — single batch call)
         t2        = time.time()
         score_map = generate_risk_scores_batch(app_ids)
         model_ms  = (time.time() - t2) * 1000
 
-        # Step 3: Audit DB lookup (OPT-1 — single batch query)
         t3        = time.time()
         audit_map = batch_get_audit_info(app_ids)
         audit_ms  = (time.time() - t3) * 1000
 
-        # Step 4: Rules evaluation + memo/response assembly
-        # BUG-6 FIX: this step now has its own timer for the profiling log.
         t4           = time.time()
         applications = []
         for _, row in subset.iterrows():
@@ -589,7 +575,6 @@ def get_applications(limit: int = 10, offset: int = 0):
 
         total_ms = (time.time() - request_start) * 1000
 
-        # BUG-6 FIX: all 5 pipeline steps now appear in the profiling log.
         print(
             f"[PROFILE] "
             f"load={data_load_ms:.2f}ms "
@@ -599,7 +584,6 @@ def get_applications(limit: int = 10, offset: int = 0):
             f"total={total_ms:.2f}ms"
         )
 
-        # BUG-1 FIX: removed the duplicate unreachable return statement.
         return {"total": TOTAL_APPLICATIONS, "applications": applications}
 
     except Exception as e:
@@ -608,7 +592,6 @@ def get_applications(limit: int = 10, offset: int = 0):
 
 # =========================================================
 # APPLICATION DETAIL
-# (Single-ID path — batch not needed here)
 # =========================================================
 @app.get("/api/applications/{application_id}")
 def get_application_detail(application_id: str):
@@ -674,8 +657,6 @@ def get_credit_based_note(decision: str, cibil_score: int, risk_score: float, ri
 
 # =========================================================
 # HISTORY — GET /api/applications/{id}/history
-# BUG-3 FIX: DB connection now wrapped in try/finally so it is always
-# returned to the pool even when an exception fires mid-function.
 # =========================================================
 @app.get("/api/applications/{application_id}/history")
 def get_decision_history(application_id: str):
@@ -715,7 +696,6 @@ def get_decision_history(application_id: str):
         if not email_to:
             email_to = MAIL_TEST_RECIPIENT
 
-        # BUG-3 FIX: connection always returned via finally block.
         conn = None
         rows = []
         try:
@@ -746,7 +726,6 @@ def get_decision_history(application_id: str):
                 }
                 real_audit_id = _audit_worker(payload)
                 latency_ms    = round((time.time() - history_start) * 1000, 2)
-                # BUG-5 FIX: email sent in background, does not block response.
                 fire_and_forget_email(
                     email_to,
                     f"History Report – {application_id}",
@@ -824,7 +803,6 @@ def get_decision_history(application_id: str):
                 f"  [{rec['timestamp'] or 'N/A'}]  {rec['decision']}  "
                 f"by {rec['analyst_name']}  |  {rec['notes'] or ''}"
             )
-        # BUG-5 FIX: email sent in background, does not block response.
         fire_and_forget_email(
             email_to,
             f"History Report – {application_id}",
@@ -841,17 +819,27 @@ def get_decision_history(application_id: str):
 
 # =========================================================
 # PROCESS DECISION — POST /api/applications/{id}/process-decision
-# OPT-4 applied: audit logging is truly fire-and-forget.
-# BUG-2 FIX: asyncio.create_task(fire_and_forget_audit()) replaced with
-#             fire_and_forget_audit() (plain thread-pool submit).
-# BUG-5 FIX: send_email() replaced with fire_and_forget_email() so the
-#             SMTP call no longer blocks the HTTP response.
-# BUG-MINOR FIX: email_sent initialised before try block to prevent
-#                UnboundLocalError if exception fires before assignment.
+#
+# AUTH FIX: analyst_name is no longer trusted from the request body.
+# It is now derived from the authenticated JWT (current_user), via the
+# get_current_user dependency. This closes the spoofing gap where any
+# caller could claim to be any analyst simply by setting a field in
+# the JSON payload.
+#
+# Callers must now send:  Authorization: Bearer <jwt>
+# The JWT payload must contain a 'name' and/or 'email' claim.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
-async def process_decision(application_id: str, req: DecisionRequest):
+async def process_decision(
+    application_id: str,
+    req: DecisionRequest,
+    current_user: dict = Depends(get_current_user),
+):
     decision_start = time.time()
+
+    # Analyst identity comes from the verified token, not client input.
+    analyst_name = current_user.get("name") or current_user.get("email") or "Unknown"
+
     decision_map = {
         "APPROVE": "APPROVE", "APPROVED": "APPROVE",
         "REJECT":  "REJECT",  "REJECTED": "REJECT",
@@ -862,7 +850,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
         return {"status": "failed", "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
     decision     = decision_map[decision]
     notes        = req.notes or ""
-    analyst_name = req.analyst_name or ""
     conn         = None
     search_id    = str(application_id).strip().upper()
 
@@ -892,7 +879,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
 
     notification_sent = False
     notification_type = None
-    # BUG-MINOR FIX: initialise email_sent before try so it is always defined.
     email_sent = False
 
     try:
@@ -926,9 +912,6 @@ async def process_decision(application_id: str, req: DecisionRequest):
         db_pool.putconn(conn)
         conn = None
 
-        # BUG-5 FIX: replaced blocking send_email() with fire_and_forget_email().
-        # Email is dispatched to the thread pool and the function returns
-        # immediately — SMTP latency (200–800 ms) no longer blocks the response.
         if decision == "APPROVE":
             fire_and_forget_email(
                 recipient_email,
@@ -974,12 +957,9 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "decision":       decision,
         "notes":          notes,
         "applicant_name": real_applicant_name,
-        "analyst_name":   analyst_name,
+        "analyst_name":   analyst_name,  # sourced from verified JWT
     }
 
-    # BUG-2 FIX: replaced asyncio.create_task(fire_and_forget_audit(...))
-    # with a plain fire_and_forget_audit() call (thread-pool submit).
-    # No event loop dependency — safe in all call contexts.
     audit_id = _audit_worker(audit_payload)
 
     latency_ms = round((time.time() - decision_start) * 1000, 2)
@@ -987,7 +967,7 @@ async def process_decision(application_id: str, req: DecisionRequest):
         "application_id":    application_id,
         "applicant_name":    real_applicant_name,
         "analyst_name":      analyst_name,
-        "audit_id":          audit_id,   # not waited for — audit writes in background
+        "audit_id":          audit_id,
         "status":            decision.lower(),
         "next_action":       notification_type,
         "notification_sent": notification_sent,
