@@ -865,16 +865,13 @@ async def process_decision(application_id: str, req: DecisionRequest, request: R
 
     # PRACTICAL FIX (Week 7 sprint): analyst_name now comes from the
     # X-Analyst-Name request header instead of the request body, since
-    # there is no auth system yet. Falls back to req.analyst_name for
-    # backward compatibility while the frontend is updated.
-    analyst_name = request.headers.get("X-Analyst-Name", "").strip()
-    if not analyst_name:
-        analyst_name = (req.analyst_name or "").strip()
+    # there is no auth system yet.
+    analyst_name = request.headers.get("X-Analyst-Name", "")
 
     if not analyst_name or analyst_name.lower() in ("none", "null", "undefined"):
         return JSONResponse(status_code=400, content={
             "status": "failed",
-            "error": "analyst_name is required. Send it via the X-Analyst-Name header (or analyst_name field)."
+            "error": "analyst_name is required. Send it via the X-Analyst-Name header."
         })
 
     conn         = None
