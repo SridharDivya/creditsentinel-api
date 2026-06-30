@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
@@ -850,7 +850,7 @@ def get_decision_history(application_id: str):
 #                UnboundLocalError if exception fires before assignment.
 # =========================================================
 @app.post("/api/applications/{application_id}/process-decision")
-async def process_decision(application_id: str, req: DecisionRequest):
+async def process_decision(application_id: str, req: DecisionRequest, request: Request):
     decision_start = time.time()
     decision_map = {
         "APPROVE": "APPROVE", "APPROVED": "APPROVE",
@@ -862,12 +862,21 @@ async def process_decision(application_id: str, req: DecisionRequest):
         return {"status": "failed", "error": "Invalid decision. Allowed: APPROVE, REJECT, REVIEW"}
     decision     = decision_map[decision]
     notes        = req.notes or ""
-    analyst_name = (req.analyst_name or "").strip()
+
+    # PRACTICAL FIX (Week 7 sprint): analyst_name now comes from the
+    # X-Analyst-Name request header instead of the request body, since
+    # there is no auth system yet. Falls back to req.analyst_name for
+    # backward compatibility while the frontend is updated.
+    analyst_name = request.headers.get("X-Analyst-Name", "").strip()
+    if not analyst_name:
+        analyst_name = (req.analyst_name or "").strip()
+
     if not analyst_name or analyst_name.lower() in ("none", "null", "undefined"):
         return JSONResponse(status_code=400, content={
             "status": "failed",
-            "error": "analyst_name is required and cannot be empty. The request must identify who is making this decision."
+            "error": "analyst_name is required. Send it via the X-Analyst-Name header (or analyst_name field)."
         })
+
     conn         = None
     search_id    = str(application_id).strip().upper()
 
