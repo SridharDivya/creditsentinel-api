@@ -46,6 +46,67 @@ def get_db_connection():
 
 
 # =========================================================
+# CREATE REQUIRED DATABASE TABLES
+# =========================================================
+def create_database_tables():
+    """
+    Create required PostgreSQL tables if they do not exist.
+    This runs automatically when the application starts.
+    """
+
+    conn = None
+    cursor = None
+
+    try:
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # -------------------------------------------------
+        # AUDIT TRAIL TABLE
+        # -------------------------------------------------
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audit_trail (
+                audit_id SERIAL PRIMARY KEY,
+                application_id VARCHAR(100) NOT NULL,
+                decision VARCHAR(50) NOT NULL,
+                decision_notes TEXT DEFAULT '',
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # -------------------------------------------------
+        # INDEX FOR FASTER HISTORY LOOKUPS
+        # -------------------------------------------------
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_audit_trail_application_id
+            ON audit_trail(application_id);
+        """)
+
+        conn.commit()
+
+        print("✅ Database tables ready")
+        print("✅ audit_trail table ready")
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(
+            f"❌ Database table creation failed: {e}"
+        )
+
+    finally:
+
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+# =========================================================
 # FASTAPI APP
 # =========================================================
 app = FastAPI(
@@ -65,16 +126,25 @@ app.add_middleware(
 # =========================================================
 # BASE DIRECTORY & LOAD FILES
 # =========================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
 model = joblib.load(
-    os.path.join(BASE_DIR, "lightgbm_0.8106.pkl")
+    os.path.join(
+        BASE_DIR,
+        "lightgbm_0.8106.pkl"
+    )
 )
 
 print("✅ Model Loaded")
 
+
 applications_df = pd.read_csv(
-    os.path.join(BASE_DIR, "loan_applications.csv")
+    os.path.join(
+        BASE_DIR,
+        "loan_applications.csv"
+    )
 )
 
 print(
@@ -96,10 +166,17 @@ TOTAL_APPLICATIONS = 15000
 # POSTGRESQL CONNECTION TEST
 # =========================================================
 try:
+
     conn_test = get_db_connection()
     conn_test.close()
+
     print("✅ PostgreSQL Connected")
+
+    # Create required database tables automatically
+    create_database_tables()
+
 except Exception as e:
+
     print(
         f"❌ PostgreSQL Connection Failed: {e}"
     )
@@ -109,16 +186,28 @@ except Exception as e:
 # MODEL FEATURES
 # =========================================================
 if hasattr(model, "feature_names_in_"):
-    MODEL_FEATURES = list(model.feature_names_in_)
+
+    MODEL_FEATURES = list(
+        model.feature_names_in_
+    )
+
 else:
-    MODEL_FEATURES = list(model.feature_name_)
+
+    MODEL_FEATURES = list(
+        model.feature_name_
+    )
 
 
 # =========================================================
 # SAFE HELPERS
 # =========================================================
-def safe_float(val, default=0.0):
+def safe_float(
+    val,
+    default=0.0
+):
+
     try:
+
         result = float(val)
 
         if math.isnan(result) or math.isinf(result):
@@ -127,11 +216,17 @@ def safe_float(val, default=0.0):
         return result
 
     except Exception:
+
         return default
 
 
-def safe_int(val, default=0):
+def safe_int(
+    val,
+    default=0
+):
+
     try:
+
         result = float(val)
 
         if math.isnan(result) or math.isinf(result):
@@ -140,46 +235,71 @@ def safe_int(val, default=0):
         return int(result)
 
     except Exception:
+
         return default
 
 
-def safe_str(val, default=""):
+def safe_str(
+    val,
+    default=""
+):
+
     try:
+
         if val is None:
             return default
 
         if isinstance(val, float):
+
             if math.isnan(val) or math.isinf(val):
                 return default
 
         return str(val)
 
     except Exception:
+
         return default
 
 
 # =========================================================
 # SHARED HELPERS
 # =========================================================
-def get_risk_tier(risk_score: float) -> str:
+def get_risk_tier(
+    risk_score: float
+) -> str:
 
     if risk_score < 0.4:
+
         return "Low"
 
     elif risk_score < 0.65:
+
         return "Medium"
 
     else:
+
         return "High"
 
 
-def get_status(risk_tier: str) -> str:
+def get_status(
+    risk_tier: str
+) -> str:
 
     return {
-        "Low": "Approved",
-        "Medium": "Under Review",
-        "High": "Rejected"
-    }.get(risk_tier, "Pending")
+
+        "Low":
+            "Approved",
+
+        "Medium":
+            "Under Review",
+
+        "High":
+            "Rejected"
+
+    }.get(
+        risk_tier,
+        "Pending"
+    )
 
 
 def get_foir(
@@ -188,6 +308,7 @@ def get_foir(
 ) -> float:
 
     if monthly_income > 0:
+
         return round(
             (monthly_emi / monthly_income) * 100,
             2
@@ -208,23 +329,38 @@ def compute_cibil_score(row) -> int:
     )
 
     foir = safe_float(
-        row_dict.get("foir", 0)
+        row_dict.get(
+            "foir",
+            0
+        )
     )
 
     monthly_income = safe_float(
-        row_dict.get("monthly_income", 0)
+        row_dict.get(
+            "monthly_income",
+            0
+        )
     )
 
     loan_to_income = safe_float(
-        row_dict.get("loan_to_income_ratio", 0)
+        row_dict.get(
+            "loan_to_income_ratio",
+            0
+        )
     )
 
     num_existing_loans = safe_float(
-        row_dict.get("num_existing_loans", 0)
+        row_dict.get(
+            "num_existing_loans",
+            0
+        )
     )
 
     employment_years = safe_float(
-        row_dict.get("employment_years", 0)
+        row_dict.get(
+            "employment_years",
+            0
+        )
     )
 
     # Base score
@@ -234,66 +370,84 @@ def compute_cibil_score(row) -> int:
     # FOIR
     # -----------------------------------------------------
     if foir <= 30:
+
         score += 40
 
     elif foir <= 40:
+
         score += 10
 
     elif foir <= 50:
+
         score -= 20
 
     elif foir <= 60:
+
         score -= 60
 
     else:
+
         score -= 100
 
     # -----------------------------------------------------
     # Monthly income
     # -----------------------------------------------------
     if monthly_income >= 100000:
+
         score += 50
 
     elif monthly_income >= 75000:
+
         score += 35
 
     elif monthly_income >= 50000:
+
         score += 20
 
     elif monthly_income >= 30000:
+
         score += 5
 
     else:
+
         score -= 20
 
     # -----------------------------------------------------
     # Loan-to-income ratio
     # -----------------------------------------------------
     if loan_to_income <= 2:
+
         score += 30
 
     elif loan_to_income <= 4:
+
         score += 10
 
     elif loan_to_income <= 6:
+
         score -= 20
 
     else:
+
         score -= 50
 
     # -----------------------------------------------------
     # Existing loans
     # -----------------------------------------------------
     if num_existing_loans == 0:
+
         score += 20
 
     elif num_existing_loans == 1:
+
         score += 5
 
     elif num_existing_loans == 2:
+
         score -= 15
 
     else:
+
         score -= 30 * (
             num_existing_loans - 2
         )
@@ -302,24 +456,32 @@ def compute_cibil_score(row) -> int:
     # Employment years
     # -----------------------------------------------------
     if employment_years >= 10:
+
         score += 40
 
     elif employment_years >= 5:
+
         score += 25
 
     elif employment_years >= 3:
+
         score += 10
 
     elif employment_years >= 1:
+
         score -= 5
 
     else:
+
         score -= 25
 
     # Standard CIBIL range
     return max(
         300,
-        min(900, int(score))
+        min(
+            900,
+            int(score)
+        )
     )
 
 
@@ -349,10 +511,13 @@ def generate_risk_score(
         )
 
         filtered_features = {
-            feature: features_dict.get(
-                feature,
-                0
-            )
+
+            feature:
+                features_dict.get(
+                    feature,
+                    0
+                )
+
             for feature in MODEL_FEATURES
         }
 
@@ -364,7 +529,10 @@ def generate_risk_score(
             features_df
             .fillna(0)
             .replace(
-                [np.inf, -np.inf],
+                [
+                    np.inf,
+                    -np.inf
+                ],
                 0
             )
             .astype(float)
@@ -384,8 +552,12 @@ def generate_risk_score(
         )
 
         return {
-            "risk_score": risk_score,
-            "risk_tier": risk_tier
+
+            "risk_score":
+                risk_score,
+
+            "risk_tier":
+                risk_tier
         }
 
     except Exception as e:
@@ -395,8 +567,12 @@ def generate_risk_score(
         )
 
         return {
-            "risk_score": 0.0,
-            "risk_tier": "Low"
+
+            "risk_score":
+                0.0,
+
+            "risk_tier":
+                "Low"
         }
 
 
@@ -416,8 +592,26 @@ class BatchScoreRequest(BaseModel):
 class DecisionRequest(BaseModel):
 
     decision: str
+
     notes: Optional[str] = ""
+
     timestamp: Optional[str] = None
+
+
+# =========================================================
+# ROOT
+# =========================================================
+@app.get("/")
+def root():
+
+    return {
+
+        "message":
+            "CreditSentinel API is running",
+
+        "status":
+            "healthy"
+    }
 
 
 # =========================================================
@@ -427,9 +621,16 @@ class DecisionRequest(BaseModel):
 def health():
 
     return {
-        "status": "ok",
-        "model_loaded": True,
-        "total_applications": TOTAL_APPLICATIONS,
+
+        "status":
+            "ok",
+
+        "model_loaded":
+            True,
+
+        "total_applications":
+            TOTAL_APPLICATIONS,
+
         "cibil_source":
             "computed_from_foir_income_lti_loans_employment"
     }
@@ -450,6 +651,7 @@ def score_application(
         )
 
         return {
+
             "application_id":
                 req.application_id,
 
@@ -469,6 +671,7 @@ def score_application(
     except Exception as e:
 
         return {
+
             "application_id":
                 req.application_id,
 
@@ -509,6 +712,7 @@ def score_batch(
         })
 
     return {
+
         "total_applications":
             len(results),
 
@@ -607,7 +811,9 @@ def get_applications(
                     risk_tier,
 
                 "cibil_score":
-                    compute_cibil_score(row),
+                    compute_cibil_score(
+                        row
+                    ),
 
                 "credit_score":
                     get_ml_credit_score(
@@ -621,6 +827,7 @@ def get_applications(
             })
 
         return {
+
             "total":
                 TOTAL_APPLICATIONS,
 
@@ -635,6 +842,7 @@ def get_applications(
         )
 
         return {
+
             "error":
                 str(e)
         }
@@ -662,6 +870,7 @@ def get_application_detail(
         if len(matched) == 0:
 
             return {
+
                 "error":
                     "Application not found"
             }
@@ -683,12 +892,15 @@ def get_application_detail(
         )
 
         foir = (
+
             round(
                 (monthly_emi / monthly_income)
                 * 100,
                 2
             )
+
             if monthly_income > 0
+
             else 0
         )
 
@@ -715,19 +927,25 @@ def get_application_detail(
         application_status = safe_str(
             row.get(
                 "application_status",
-                row.get("status", "")
+                row.get(
+                    "status",
+                    ""
+                )
             )
         )
 
         if application_status == "":
 
             if risk_score >= 0.75:
+
                 application_status = "Rejected"
 
             elif risk_score >= 0.45:
+
                 application_status = "Pending"
 
             else:
+
                 application_status = "Approved"
 
         print(
@@ -806,6 +1024,7 @@ def get_application_detail(
         )
 
         return {
+
             "error":
                 str(e)
         }
@@ -851,7 +1070,9 @@ def get_decision_history(
         if not rows:
 
             return {
-                "history": []
+
+                "history":
+                    []
             }
 
         history = []
@@ -876,13 +1097,19 @@ def get_decision_history(
             })
 
         return {
+
             "history":
                 history
         }
 
     except Exception as e:
 
+        print(
+            traceback.format_exc()
+        )
+
         return {
+
             "error":
                 str(e)
         }
@@ -901,9 +1128,11 @@ def log_decision(
 ):
 
     valid_decisions = [
+
         "APPROVE",
         "REJECT",
         "REVIEW"
+
     ]
 
     decision = req.decision.upper()
@@ -911,6 +1140,7 @@ def log_decision(
     if decision not in valid_decisions:
 
         return {
+
             "error":
                 "Invalid decision"
         }
@@ -970,7 +1200,12 @@ def log_decision(
 
     except Exception as e:
 
+        print(
+            traceback.format_exc()
+        )
+
         return {
+
             "error":
                 str(e)
         }
@@ -1032,7 +1267,9 @@ def portfolio_summary():
             index=df.index
         )
 
+        # -------------------------------------------------
         # FOIR
+        # -------------------------------------------------
         score += np.select(
 
             [
@@ -1052,7 +1289,9 @@ def portfolio_summary():
             default=-100
         )
 
+        # -------------------------------------------------
         # Monthly income
+        # -------------------------------------------------
         score += np.select(
 
             [
@@ -1072,7 +1311,9 @@ def portfolio_summary():
             default=-20
         )
 
+        # -------------------------------------------------
         # Loan-to-income
+        # -------------------------------------------------
         score += np.select(
 
             [
@@ -1090,13 +1331,18 @@ def portfolio_summary():
             default=-50
         )
 
+        # -------------------------------------------------
         # Existing loans
+        # -------------------------------------------------
         extra_penalty = np.where(
+
             num_existing_loans > 2,
+
             -30 *
             (
                 num_existing_loans - 2
             ),
+
             0
         )
 
@@ -1117,7 +1363,9 @@ def portfolio_summary():
             default=extra_penalty
         )
 
+        # -------------------------------------------------
         # Employment years
+        # -------------------------------------------------
         score += np.select(
 
             [
@@ -1137,7 +1385,9 @@ def portfolio_summary():
             default=-25
         )
 
+        # -------------------------------------------------
         # Clamp to 300-900
+        # -------------------------------------------------
         score = (
             score
             .clip(300, 900)
@@ -1145,19 +1395,25 @@ def portfolio_summary():
         )
 
         low = int(
-            (score >= 750).sum()
+            (
+                score >= 750
+            ).sum()
         )
 
         medium = int(
+
             (
                 (score >= 650)
                 &
                 (score < 750)
             ).sum()
+
         )
 
         high = int(
-            (score < 650).sum()
+            (
+                score < 650
+            ).sum()
         )
 
         elapsed = round(
@@ -1201,6 +1457,7 @@ def portfolio_summary():
         )
 
         return {
+
             "error":
                 str(e),
 
