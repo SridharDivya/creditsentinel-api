@@ -111,7 +111,7 @@ except Exception as e:
 if hasattr(model, "feature_names_in_"):
     MODEL_FEATURES = list(model.feature_names_in_)
 else:
-    MODEL_FEATURES = list(model.feature_name_())
+    MODEL_FEATURES = list(model.feature_name_)
 
 
 # =========================================================
